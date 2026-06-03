@@ -8,28 +8,30 @@ import android.util.Log
 
 class SmsReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        // Kiểm tra hành động nhận tin nhắn SMS
-        if (intent.action == Telephony.Sms.Intents.SMS_RECEIVED_ACTION) {
-            // Trích xuất mảng tin nhắn gửi đến từ hệ thống
-            val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
-            if (!messages.isNullOrEmpty()) {
-                val firstMessage = messages[0]
-                val incomingNumber = firstMessage.originatingAddress ?: "Không rõ số"
+        Log.d("SMS_RECEIVER", "📡 Tín hiệu Broadcast đổ vào SmsReceiver. Action: ${intent.action}")
 
-                // Gộp toàn bộ nội dung nếu tin nhắn dài bị chia làm nhiều phần
-                val fullContent = messages.joinToString(separator = "") { it.messageBody ?: "" }
+        // Trích xuất trực tiếp mảng dữ liệu tin nhắn đi kèm trong Intent
+        val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
 
-                MainActivity.addLog("💬 [Receiver] Nhận tin nhắn từ $incomingNumber")
-                Log.d("SMS_RECEIVER", "Nội dung: $fullContent")
+        if (!messages.isNullOrEmpty()) {
+            val firstMessage = messages[0]
+            val rawIncomingNumber = firstMessage.originatingAddress ?: "Không rõ số"
+            val formattedNumber = PhoneUtils.formatVietnamesePhoneNumber(rawIncomingNumber)
+            // Gộp toàn bộ nội dung nếu tin nhắn dài bị chia làm nhiều phần
+            val fullContent = messages.joinToString(separator = "") { it.messageBody ?: "" }
 
-                // Đẩy thông tin thực tế sang ServerReporter
-                ServerReporter.sendEvent(
-                    context = context,
-                    type = "SMS",
-                    incomingNumber = incomingNumber,
-                    content = fullContent
-                )
-            }
+            MainActivity.addLog("💬 [Receiver] Nhận tin nhắn từ $formattedNumber")
+            Log.d("SMS_RECEIVER", "Nội dung nhận được: $fullContent")
+
+            // Đẩy thông tin thực tế sang ServerReporter
+            ServerReporter.sendEvent(
+                context = context,
+                type = "SMS",
+                incomingNumber = formattedNumber,
+                content = fullContent
+            )
+        } else {
+            Log.w("SMS_RECEIVER", "⚠ Nhận được Broadcast nhưng mảng dữ liệu tin nhắn trống.")
         }
     }
 }
