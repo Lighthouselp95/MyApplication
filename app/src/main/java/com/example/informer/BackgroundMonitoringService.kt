@@ -1,22 +1,24 @@
 package com.example.informer
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
-import android.os.PowerManager
+import android.os.Looper
+import android.os.SystemClock
 import android.provider.ContactsContract
-import android.provider.Telephony
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import android.util.Log
@@ -25,24 +27,21 @@ import androidx.core.app.NotificationCompat
 class BackgroundMonitoringService : Service() {
 
     private lateinit var telephonyManager: TelephonyManager
-    private var connectivityManager: ConnectivityManager? = null
     private var callStateCallback: CallStateCallbackImpl? = null
     private var lastReportedNumber: String? = null
 
-    // WakeLock dùng để giữ CPU không ngủ trong 5 giây khi có sự kiện đẩy dữ liệu lên Render
-    private var wakeLock: PowerManager.WakeLock? = null
-
-    // Bộ thu nhận tin nhắn đăng ký động - Giữ sinh mệnh sống thụ động cùng Service
-    private var dynamicSmsReceiver: SmsReceiver? = null
-
-    // Lắng nghe mạng thụ động: Chỉ kích hoạt khi OS báo mạng có biến động, không tự quét
-    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) {
-            super.onAvailable(network)
-            Log.d("METIS_HIBERNATE", "🌐 Mạng khả dụng. Tiến trình chuyển trạng thái sẵn sàng.")
+    // KÊNH 1: Handler tạo nhịp xung nhẹ tuần hoàn chống cách ly tiến trình
+    private val heartbeatHandler = Handler(Looper.getMainLooper())
+    private val heartbeatRunnable = object : Runnable {
+        override fun run() {
+            // Nhịp xung giả lập tác vụ hệ thống nhẹ nhàng (Cập nhật log tĩnh)
+            Log.d("METIS_HEARTBEAT", "💓 Micro-pulse: Tiến trình duy trì sinh mệnh đang hoạt động bình thường.")
+            // Lặp lại sau mỗi 15 giây - Khoảng thời gian vàng vừa đủ giữ App sống, vừa không tốn pin
+            heartbeatHandler.postDelayed(this, 15000)
         }
     }
 
+    // Định nghĩa bộ lắng nghe trạng thái cuộc gọi từ phần cứng
     private class CallStateCallbackImpl(
         private val onCallStateChangedAction: (state: Int, incomingNumber: String?) -> Unit
     ) : TelephonyCallback(), TelephonyCallback.CallStateListener {
@@ -54,42 +53,15 @@ class BackgroundMonitoringService : Service() {
     override fun onCreate() {
         super.onCreate()
         startForegroundServiceNotification()
-
         telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
 
-        // Khởi tạo thực thể kiểm soát năng lượng CPU
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Informer::DataSyncWakeLock")
+        // 🔥 KÍCH HOẠT KÊNH 1: Khởi động mạch xung Handler ngầm
+        heartbeatHandler.post(heartbeatRunnable)
 
-        // 1. Đăng ký mạng thụ động (Tiết kiệm pin tuyệt đối, tăng điểm Metis)
-        try {
-            connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            val networkRequest = NetworkRequest.Builder()
-                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .build()
-            connectivityManager?.registerNetworkCallback(networkRequest, networkCallback)
-        } catch (e: Exception) {
-            Log.e("METIS_HIBERNATE", "Lỗi cấu hình Network Callback: ${e.message}")
-        }
+        // 🔥 KÍCH HOẠT KÊNH 2: Cài đặt Neo lặp AlarmManager ở tầng lõi OS
+        scheduleNextHeartbeatAlarm()
 
-        // 2. Đăng ký SmsReceiver động chống đóng băng
-        try {
-            dynamicSmsReceiver = SmsReceiver()
-            val filter = IntentFilter(Telephony.Sms.Intents.SMS_RECEIVED_ACTION).apply {
-                priority = 2147483647
-            }
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                registerReceiver(dynamicSmsReceiver, filter, Context.RECEIVER_EXPORTED)
-            } else {
-                registerReceiver(dynamicSmsReceiver, filter)
-            }
-            Log.d("METIS_HIBERNATE", "✅ SmsReceiver chế độ thụ động hoạt động.")
-        } catch (e: Exception) {
-            Log.e("METIS_HIBERNATE", "Lỗi cấu hình SMS Receiver: ${e.message}")
-        }
-
-        // Logic bóc tách cuộc gọi thụ động từ phần cứng hạ tầng OS
+        // Xử lý bóc tách biến động cuộc gọi
         val stateChangedAction = { state: Int, incomingNumber: String? ->
             val activeNumber = incomingNumber
             when (state) {
@@ -97,15 +69,11 @@ class BackgroundMonitoringService : Service() {
                     if (!activeNumber.isNullOrBlank() && activeNumber != lastReportedNumber) {
                         lastReportedNumber = activeNumber
 
-                        // Đánh thức CPU tạm thời trong 5 giây để thực thi tiến trình gửi API không bị đứt gãy
-                        acquireTemporaryWakeLock(5000)
-
                         val formattedNumber = MainActivity.formatVietnamesePhoneNumber(activeNumber)
                         val contactName = getContactName(applicationContext, activeNumber)
 
                         MainActivity.addLog("📞 Cuộc gọi đến: $activeNumber ($contactName)")
 
-                        // Đẩy dữ liệu bất đồng bộ thụ động
                         ServerReporter.sendEvent(
                             context = applicationContext,
                             type = "CALL",
@@ -120,7 +88,7 @@ class BackgroundMonitoringService : Service() {
             }
         }
 
-        // Đăng ký bộ lắng nghe Telephony chuẩn hóa Android đời cao
+        // Đăng ký Callback với hệ thống
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             callStateCallback = CallStateCallbackImpl { state, incomingNumber ->
                 stateChangedAction(state, incomingNumber)
@@ -137,15 +105,39 @@ class BackgroundMonitoringService : Service() {
         }
     }
 
-    private fun acquireTemporaryWakeLock(timeout: Long) {
+    // Thuật toán Neo lặp: Tự động lên lịch báo thức chính xác để ép OS mở luồng xử lý
+    private fun scheduleNextHeartbeatAlarm() {
         try {
-            if (wakeLock?.isHeld == false) {
-                wakeLock?.acquire(timeout)
-                Log.d("METIS_HIBERNATE", "⚡ Đã kích hoạt WakeLock ngắn hạn cứu luồng mạng!")
+            val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            val intent = Intent(this, BackgroundMonitoringService::class.java)
+
+            val pendingIntent = PendingIntent.getService(
+                this,
+                999,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            // Kích hoạt báo thức chính xác xuyên qua cả chế độ Doze Mode của Oppo
+            val triggerTime = SystemClock.elapsedRealtime() + 60000 // Thức tỉnh định kỳ mỗi 1 phút
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                alarmManager.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerTime, pendingIntent)
+            } else {
+                alarmManager.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerTime, pendingIntent)
             }
         } catch (e: Exception) {
-            Log.e("METIS_HIBERNATE", "Không thể giữ WakeLock", e)
+            Log.e("METIS_HEARTBEAT", "Không thể thiết lập Alarm Neo lặp: ${e.message}")
         }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startForegroundServiceNotification()
+
+        // Mỗi lần AlarmManager gọi vào, ta lại gia hạn lịch cho chu kỳ tiếp theo
+        scheduleNextHeartbeatAlarm()
+
+        return START_STICKY
     }
 
     private fun getContactName(context: Context, phoneNumber: String): String {
@@ -165,27 +157,15 @@ class BackgroundMonitoringService : Service() {
         return contactName
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForegroundServiceNotification()
-        return START_STICKY
-    }
-
     override fun onDestroy() {
-        if (dynamicSmsReceiver != null) {
-            try { unregisterReceiver(dynamicSmsReceiver) } catch (e: Exception) {}
-        }
-        try { connectivityManager?.unregisterNetworkCallback(networkCallback) } catch (e: Exception) {}
+        // Hủy toàn bộ nhịp xung để tránh rò rỉ khi Service chủ động dừng
+        heartbeatHandler.removeCallbacks(heartbeatRunnable)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             callStateCallback?.let { telephonyManager.unregisterTelephonyCallback(it) }
         } else {
             @Suppress("DEPRECATION")
             telephonyManager.listen(null, android.telephony.PhoneStateListener.LISTEN_NONE)
-        }
-
-        // Giải phóng khóa năng lượng an toàn
-        if (wakeLock?.isHeld == true) {
-            wakeLock?.release()
         }
         super.onDestroy()
     }
@@ -197,8 +177,7 @@ class BackgroundMonitoringService : Service() {
         val channelName = "Hệ thống đồng bộ ngầm"
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            // Sử dụng IMPORTANCE_MIN để hệ thống ngầm hiểu App đang ở trạng thái ngủ tĩnh, không tốn tài nguyên nền
-            val chan = NotificationChannel(channelId, channelName, NotificationManager.IMPORTANCE_MIN)
+            val chan = NotificationChannel(channelId, channelName, NotificationManager.IMPORTANCE_DEFAULT)
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.createNotificationChannel(chan)
         }
@@ -206,9 +185,9 @@ class BackgroundMonitoringService : Service() {
         val notification = NotificationCompat.Builder(this, channelId)
             .setOngoing(true)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle("Hệ thống kiểm tra phần cứng thiết bị")
-            .setContentText("Trạng thái ổn định (Chế độ tiết kiệm tài nguyên ngầm)...")
-            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setContentTitle("Hệ thống đồng bộ đang hoạt động")
+            .setContentText("Thiết bị đang được kết nối ngầm liên tục...")
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .build()
 
