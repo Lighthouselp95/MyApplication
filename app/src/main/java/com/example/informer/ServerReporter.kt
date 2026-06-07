@@ -3,80 +3,104 @@ package com.example.informer
 import android.content.Context
 import android.util.Log
 import org.json.JSONObject
-import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.concurrent.thread
 
 object ServerReporter {
-
     private const val SERVER_API_URL = "https://portal-mirroring.onrender.com/api/push"
+    private const val MAX_RETRY = 2  // Giảm từ 3 xuống 2 để tổng thời gian < 45s
 
-    fun sendEvent(context: Context, type: String, incomingNumber: String, content: String) {
-        val sharedPref = context.getSharedPreferences("AppConfig", Context.MODE_PRIVATE)
-        val myPhoneNumber = sharedPref.getString("my_phone", "") ?: ""
+    fun sendEventSync(
+        context: Context,
+        type: String,
+        incomingNumber: String,
+        content: String,
+        timestamp: Long? = null
+    ): Boolean {
+        // Hỗ trợ Direct Boot bằng cách sử dụng Device Protected Storage nếu cần
+        val safeContext = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N && !context.isDeviceProtectedStorage) {
+            context.createDeviceProtectedStorageContext()
+        } else {
+            context
+        }
+        val sharedPref = safeContext.getSharedPreferences("AppConfig", Context.MODE_PRIVATE)
+        val myPhone = sharedPref.getString("my_phone", "") ?: ""
         val token = sharedPref.getString("token", "") ?: ""
+        Log.d("SERVER", "sendEventSync type=$type incomingNumber=$incomingNumber myPhoneSet=${myPhone.isNotEmpty()} tokenSet=${token.isNotEmpty()} contentLen=${content.length}")
 
-        // SỬA TẠI ĐÂY: Chỉ chặn nếu SĐT trống. Vẫn cho phép chạy tiếp nếu Token trống
-        // để hỗ trợ tính năng đồng bộ xóa mã từ xa lên Server.
-        if (myPhoneNumber.isEmpty()) {
-            MainActivity.addLog("⚠️ Bỏ qua push: Thiết bị chưa được cấu hình Số điện thoại!")
-            Log.w("SERVER_REPORTER", "Chưa cấu hình Số điện thoại")
-            return
+        if (myPhone.isEmpty()) {
+            Log.w("SERVER", "Bỏ qua gửi vì myPhone rỗng")
+            MainActivity.addLog("⚠️ Bỏ qua $type: Chưa có số điện thoại")
+            return false
         }
 
-        thread {
+        // KHÔNG giữ WakeLock ở đây — để caller (SmsReceiver/PhoneReceiver) tự quản lý
+        repeat(MAX_RETRY) { attempt ->
+            var conn: HttpURLConnection? = null
             try {
-                val url = URL(SERVER_API_URL)
-                val conn = url.openConnection() as HttpURLConnection
+                conn = (URL(SERVER_API_URL).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                    doOutput = true
+                    // Tổng tối đa: 15s × 2 lần + 3s sleep = 33s < 45s WakeLock của SmsReceiver
+                    connectTimeout = 15_000
+                    readTimeout = 15_000
+                }
 
-                conn.requestMethod = "POST"
-                conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                conn.doOutput = true
-                conn.connectTimeout = 5000
-
-                val sdf = SimpleDateFormat("HH:mm:ss d/M/yyyy", Locale.getDefault())
-                val formattedTime = sdf.format(Date())
+                val eventDate = if (timestamp != null) Date(timestamp) else Date()
+                val timeStr = SimpleDateFormat("HH:mm:ss d/M/yyyy", Locale.getDefault()).format(eventDate)
 
                 val json = JSONObject().apply {
-                    put("myPhoneNumber", myPhoneNumber)
-                    put("token", token) // Sẽ truyền chuỗi rỗng "" lên nếu đã bấm nút Xóa mã
-                    put("type", type.uppercase().trim())
+                    put("myPhoneNumber", myPhone)
+                    put("token", token)
+                    put("type", type.uppercase())
                     put("incomingNumber", incomingNumber)
                     put("content", content)
-                    put("time", formattedTime)
+                    put("time", timeStr)
                 }
 
-                val body = json.toString().toByteArray(Charsets.UTF_8)
-                val os: OutputStream = conn.outputStream
-                os.write(body)
-                os.flush()
-                os.close()
+                conn.outputStream.use { it.write(json.toString().toByteArray(Charsets.UTF_8)) }
 
-                val responseCode = conn.responseCode
-                Log.d("SERVER_REPORTER", "API Response Code: $responseCode")
+                val code = conn.responseCode
+                Log.d("SERVER", "Attempt ${attempt + 1}: HTTP $code")
 
-                if (responseCode == 200) {
-                    if (type == "RESET") {
-                        MainActivity.addLog("🗑️ Đã đồng bộ xóa Token thành công trên Server!")
-                    } else {
-                        MainActivity.addLog("✅ Đã đẩy thành công: $type từ số $incomingNumber")
-                    }
-                } else if (responseCode == 403) {
-                    MainActivity.addLog("❌ Server từ chối: Token không hợp lệ!")
-                } else {
-                    MainActivity.addLog("⚠️ Lỗi Server trả về mã: $responseCode")
+                if (code in 200..299) {
+                    MainActivity.addLog("✅ [$type] Gửi thành công")
+                    return true
                 }
 
-                conn.disconnect()
+                Log.w("SERVER", "Server trả về $code")
+                MainActivity.addLog("⚠️ [$type] Lỗi HTTP $code (Lần ${attempt + 1})")
 
             } catch (e: Exception) {
-                Log.e("SERVER_REPORTER", "Không thể kết nối đến máy chủ API", e)
-                MainActivity.addLog("❌ Lỗi kết nối mạng: Không thể đồng bộ trạng thái Token.")
+                Log.e("SERVER", "Attempt ${attempt + 1} lỗi: ${e.message}")
+            } finally {
+                conn?.disconnect()
             }
+
+            if (attempt < MAX_RETRY - 1) Thread.sleep(3_000L)
+        }
+
+        MainActivity.addLog("❌ [$type] Gửi thất bại sau $MAX_RETRY lần thử.")
+        Log.w("SERVER", "sendEventSync thất bại type=$type afterRetry=$MAX_RETRY")
+        return false
+    }
+
+    fun sendEvent(
+        context: Context,
+        type: String,
+        incomingNumber: String,
+        content: String,
+        timestamp: Long? = null,
+        onComplete: (() -> Unit)? = null
+    ) {
+        kotlin.concurrent.thread {
+            Log.d("SERVER", "sendEvent async type=$type incomingNumber=$incomingNumber")
+            sendEventSync(context, type, incomingNumber, content, timestamp)
+            onComplete?.invoke()
         }
     }
 }

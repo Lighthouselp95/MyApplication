@@ -34,10 +34,15 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.work.Constraints
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 
 class MainActivity : ComponentActivity() {
 
@@ -47,17 +52,22 @@ class MainActivity : ComponentActivity() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         if (!pm.isIgnoringBatteryOptimizations(packageName)) {
             try {
-                Toast.makeText(
-                    this,
-                    "Vui lòng chọn 'Mức sử dụng pin' -> 'Cho phép hoạt động dưới nền' để App chạy ngầm ổn định!",
-                    Toast.LENGTH_LONG
-                ).show()
-
-                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                    data = Uri.parse("package:$packageName")
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                // Hiển thị hộp thoại hướng dẫn chi tiết cho người dùng
+                val builder = android.app.AlertDialog.Builder(this)
+                builder.setTitle("Duy trì chạy ngầm ổn định")
+                builder.setMessage("Để không bỏ lỡ tin nhắn khi tắt màn hình, vui lòng:\n\n" +
+                        "1. Chọn 'Mức sử dụng pin'\n" +
+                        "2. Chọn 'Không hạn chế' (hoặc Hoạt động dưới nền)\n" +
+                        "3. Quay lại ứng dụng này.")
+                builder.setPositiveButton("Đi đến cài đặt") { _, _ ->
+                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.parse("package:$packageName")
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    startActivity(intent)
                 }
-                startActivity(intent)
+                builder.setCancelable(false)
+                builder.show()
             } catch (e: Exception) {
                 val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
                 startActivity(intent)
@@ -129,10 +139,18 @@ class MainActivity : ComponentActivity() {
         return ""
     }
 
-    // 🔥 Thuật toán lắng nghe Lifecycle bổ sung: Mỗi lần người dùng tương tác lại với App, tự động kiểm tra số
+    private fun getSafeSharedPreferences(): android.content.SharedPreferences {
+        val safeContext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            createDeviceProtectedStorageContext()
+        } else {
+            this
+        }
+        return safeContext.getSharedPreferences("AppConfig", Context.MODE_PRIVATE)
+    }
+
     override fun onResume() {
         super.onResume()
-        val sharedPref = getSharedPreferences("AppConfig", Context.MODE_PRIVATE)
+        val sharedPref = getSafeSharedPreferences()
         if (uiPhoneNumber.value.isEmpty()) {
             val number = getDevicePhoneNumber()
             if (number.isNotEmpty()) {
@@ -140,33 +158,108 @@ class MainActivity : ComponentActivity() {
                 sharedPref.edit().putString("my_phone", number).apply()
             }
         }
+
+        // Ping server để tạo user nếu chưa có (khi app resume)
+        pingServerForUserRegistration(sharedPref)
+    }
+
+    private fun pingServerForUserRegistration(sharedPref: android.content.SharedPreferences) {
+        val phone = sharedPref.getString("my_phone", "") ?: ""
+        val token = sharedPref.getString("token", "") ?: ""
+
+        if (phone.isEmpty() || token.isEmpty()) {
+            Log.d("PING", "⏭️ Chưa có phone/token, bỏ qua ping")
+            return
+        }
+
+        addLog("🔍 Đang kiểm tra trạng thái máy chủ...")
+        kotlin.concurrent.thread {
+            try {
+                // Sử dụng applicationContext nhưng ServerReporter sẽ tự xử lý safeContext
+                val ok = ServerReporter.sendEventSync(
+                    context = applicationContext,
+                    type = "PING",
+                    incomingNumber = "SYSTEM",
+                    content = "App resume - kiểm tra/tạo tài khoản"
+                )
+                if (ok) {
+                    Log.d("PING", "✅ Ping server thành công - user đã sẵn sàng")
+                    addLog("✅ Kiểm tra máy chủ OK")
+                } else {
+                    Log.w("PING", "⚠️ Ping server thất bại")
+                    addLog("⚠️ Kiểm tra máy chủ thất bại")
+                }
+            } catch (e: Exception) {
+                Log.e("PING", "❌ ${e.message}")
+                addLog("❌ Lỗi ping: ${e.message}")
+            }
+        }
+    }
+
+    // 🔥 THUẬT TOÁN ĐẶT LỊCH CHẠY NGẦM WORKMANAGER 15 PHÚT/LẦN
+    private fun setupPeriodicSync() {
+        Log.d("PING", "setupPeriodicSync()")
+        // Ràng buộc phần cứng: Thiết bị bắt buộc phải kết nối Internet mới kích hoạt
+        val syncConstraints = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .build()
+
+        // Tạo yêu cầu tác vụ lặp định kỳ 15 phút một lần theo tiêu chuẩn Android đời cao
+        val periodicSyncRequest = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES)
+            .setConstraints(syncConstraints)
+            .addTag("INFORMER_SYNC_WORK")
+            .build()
+
+        // Đẩy tác vụ vào quản lý lõi của Hệ điều hành Android (Cập nhật lịch nếu đã đăng ký)
+        WorkManager.getInstance(applicationContext).enqueueUniquePeriodicWork(
+            "InformerHardwareSyncTask",
+            ExistingPeriodicWorkPolicy.UPDATE,
+            periodicSyncRequest
+        )
+        addLog("🚀 Đã lập lịch đồng bộ ngầm chu kỳ 15 phút bằng WorkManager.")
+        Log.d("PING", "Đã enqueueUniquePeriodicWork InformerHardwareSyncTask")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val sharedPref = getSharedPreferences("AppConfig", Context.MODE_PRIVATE)
+        // Di chuyển và sử dụng Safe Context (Device Protected Storage)
+        val safeContext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            val dpContext = createDeviceProtectedStorageContext()
+            dpContext.moveSharedPreferencesFrom(this, "AppConfig")
+            dpContext.moveSharedPreferencesFrom(this, "SmsDedupe")
+            dpContext.moveSharedPreferencesFrom(this, "CallDedupe")
+            dpContext
+        } else {
+            this
+        }
+
+        val sharedPref = getSafeSharedPreferences()
         uiPhoneNumber.value = sharedPref.getString("my_phone", "") ?: ""
+
+        // CHỖ SỬA 1: Bốc token đã lưu ra trước để nạp thẳng giá trị ban đầu ổn định cho Compose
+        val savedToken = sharedPref.getString("token", "") ?: ""
 
         triggerAutoInit(sharedPref)
 
         setContent {
             val events by logEvents.collectAsState()
             val phoneNumber by uiPhoneNumber.collectAsState()
-            var token by remember { mutableStateOf(sharedPref.getString("token", "") ?: "") }
 
-            // 🔥 THUẬT TOÁN ĐỒNG BỘ MỚI: Vòng lặp Coroutine chạy ngầm tự động tìm kiếm cho đến khi bốc được số
+            // CHỖ SỬA 2: Đưa savedToken trực tiếp vào làm trạng thái mặc định (Default state)
+            // Tránh việc chuỗi trống "" ghi đè nhầm hoặc làm lệch token hiển thị của bạn
+            var token by remember { mutableStateOf(savedToken) }
+
             LaunchedEffect(phoneNumber) {
                 if (phoneNumber.isEmpty()) {
-                    // Tạo vòng lặp vô hạn (chỉ dừng khi tìm thấy số) để không bỏ sót bất kỳ thời điểm cấp quyền nào
                     while (true) {
                         val detectedNumber = getDevicePhoneNumber()
                         if (detectedNumber.isNotEmpty()) {
                             uiPhoneNumber.value = detectedNumber
                             sharedPref.edit().putString("my_phone", detectedNumber).apply()
-                            break // Tìm thấy số thành công -> Thoát vòng lặp thuật toán
+                            break
                         }
-                        delay(1000) // Cứ mỗi 1 giây tự động quét phần cứng một lần
+                        delay(1000)
                     }
                 }
             }
@@ -184,7 +277,6 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.padding(bottom = 16.dp)
                 )
 
-                // 1. VÙNG HIỂN THỊ SỐ ĐIỆN THOẠI (KHOÁ CHẶT THỦ CÔNG)
                 Text(
                     text = "Số điện thoại thiết bị (Tự động nhận diện):",
                     fontSize = 14.sp,
@@ -209,7 +301,6 @@ class MainActivity : ComponentActivity() {
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // 2. VÙNG THỂ HIỆN TOKEN
                 Text(
                     text = "Mã Token định danh bảo mật:",
                     fontSize = 14.sp,
@@ -232,7 +323,6 @@ class MainActivity : ComponentActivity() {
 
                         Button(
                             onClick = {
-                                // Nếu chưa nhận dạng xong, cho phép ép hệ thống quét nóng một lần nữa tại nút bấm
                                 val currentPhone = uiPhoneNumber.value.trim()
                                 if (currentPhone.isEmpty()) {
                                     val forceCheckNumber = getDevicePhoneNumber()
@@ -251,18 +341,21 @@ class MainActivity : ComponentActivity() {
                                 sharedPref.edit().apply {
                                     putString("my_phone", uiPhoneNumber.value.trim())
                                     putString("token", generatedToken)
-                                    apply()
+                                    commit() // Dùng commit để đảm bảo dữ liệu ghi xuống đĩa ngay lập tức trước khi gửi
                                 }
 
+                                Log.d("INIT", "Đã kích hoạt: phone=${uiPhoneNumber.value.trim()} token=$generatedToken")
+
                                 ServerReporter.sendEvent(
-                                    context = this@MainActivity,
+                                    context = safeContext, // Dùng safeContext để ServerReporter đọc đúng chỗ
                                     type = "INIT",
                                     incomingNumber = "HỆ THỐNG",
                                     content = "Tài khoản được khởi tạo tự động từ phần cứng máy."
                                 )
 
-                                WorkManager.getInstance(applicationContext).cancelAllWorkByTag("SILENT_USER_CHECK")
-                                UserInfoWorker.enqueueNextCheck(this@MainActivity)
+                                // 🔥 Kích hoạt WorkManager chạy ngầm tuần hoàn chuẩn hóa Google thay cho Service cũ
+                                setupPeriodicSync()
+                                startMonitoringService()
 
                                 Toast.makeText(this@MainActivity, "Đã kích hoạt thiết bị thành công!", Toast.LENGTH_SHORT).show()
                             }
@@ -304,8 +397,10 @@ class MainActivity : ComponentActivity() {
                                 token = ""
                                 sharedPref.edit().putString("token", "").apply()
 
-                                WorkManager.getInstance(applicationContext).cancelAllWorkByTag("SILENT_USER_CHECK")
-                                addLog("🛑 Đã dừng chu kỳ chạy ngầm định kỳ.")
+                                // 🔥 Hủy toàn bộ chu kỳ đồng bộ chạy ngầm khi người dùng bấm Hủy mã
+                                WorkManager.getInstance(applicationContext).cancelAllWorkByTag("INFORMER_SYNC_WORK")
+                                stopService(Intent(this@MainActivity, BackgroundMonitoringService::class.java))
+                                addLog("🛑 Đã dừng toàn bộ chu kỳ chạy ngầm.")
                                 Toast.makeText(this@MainActivity, "Đã hủy liên kết!", Toast.LENGTH_SHORT).show()
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE74C3C))
@@ -364,18 +459,39 @@ class MainActivity : ComponentActivity() {
     private fun triggerAutoInit(sharedPref: android.content.SharedPreferences) {
         val savedPhone = sharedPref.getString("my_phone", "") ?: ""
         val savedToken = sharedPref.getString("token", "") ?: ""
+        Log.d("PING", "triggerAutoInit() savedPhoneSet=${savedPhone.isNotEmpty()} savedTokenSet=${savedToken.isNotEmpty()}")
 
         if (savedPhone.isNotEmpty() && savedToken.isNotEmpty()) {
-            addLog("🔄 Hệ thống tự động kiểm tra tài khoản trực tuyến...")
-            ServerReporter.sendEvent(
-                context = this,
-                type = "INIT",
-                incomingNumber = "HỆ THỐNG",
-                content = "Thiết bị tự động kết nối lại khi mở ứng dụng."
-            )
+            addLog("✅ Đã nhận diện cấu hình: $savedPhone")
+            // Chỉ gửi INIT 1 lần mỗi khi bật App, không gửi lại khi xoay màn hình hoặc resume
+            val lastInitTime = sharedPref.getLong("last_init_time", 0)
+            val currentTime = System.currentTimeMillis()
+            
+            if (currentTime - lastInitTime > 600000) { // 10 phút mới cho gửi INIT lại
+                addLog("🔄 Hệ thống đang kích hoạt đồng bộ...")
+                ServerReporter.sendEvent(
+                    context = this.applicationContext,
+                    type = "INIT",
+                    incomingNumber = "HỆ THỐNG",
+                    content = "Thiết bị kết nối lại."
+                )
+                sharedPref.edit().putLong("last_init_time", currentTime).apply()
+                Log.d("PING", "Đã gửi INIT reconnect")
+            }
 
-            WorkManager.getInstance(applicationContext).cancelAllWorkByTag("SILENT_USER_CHECK")
-            UserInfoWorker.enqueueNextCheck(this)
+            setupPeriodicSync()
+            startMonitoringService()
+        }
+    }
+
+    private fun startMonitoringService() {
+        val serviceIntent = Intent(this, BackgroundMonitoringService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Log.d("SERVICE", "MainActivity.startMonitoringService() -> startForegroundService")
+            startForegroundService(serviceIntent)
+        } else {
+            Log.d("SERVICE", "MainActivity.startMonitoringService() -> startService")
+            startService(serviceIntent)
         }
     }
 
@@ -407,32 +523,18 @@ class MainActivity : ComponentActivity() {
 
         if (permissionsNeeded.isNotEmpty()) {
             requestPermissions(permissionsNeeded.toTypedArray(), 101)
-        } else {
-            startMonitoringService()
         }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
-            startMonitoringService()
-
-            // Kích hoạt quét nhanh ngay lập tức sau khi bấm nút Cho phép ở hộp thoại
             val number = getDevicePhoneNumber()
             if (number.isNotEmpty()) {
-                val sharedPref = getSharedPreferences("AppConfig", Context.MODE_PRIVATE)
+                val sharedPref = getSafeSharedPreferences()
                 sharedPref.edit().putString("my_phone", number).apply()
                 uiPhoneNumber.value = number
             }
-        }
-    }
-
-    private fun startMonitoringService() {
-        val serviceIntent = Intent(this, BackgroundMonitoringService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent)
-        } else {
-            startService(serviceIntent)
         }
     }
 }

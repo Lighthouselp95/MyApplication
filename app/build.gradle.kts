@@ -5,11 +5,8 @@ plugins {
 
 android {
     namespace = "com.example.informer"
-    compileSdk {
-        version = release(36) {
-            minorApiLevel = 1
-        }
-    }
+    // Giữ cấu hình SDK của Android 16 (W) hiện tại của bạn
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.example.informer"
@@ -48,7 +45,10 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+
+    // Thư viện WorkManager chạy ngầm đã nằm ở đây
     implementation("androidx.work:work-runtime-ktx:2.9.0")
+
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
@@ -56,5 +56,7 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
+
+    // Thư viện AppCompat hỗ trợ các hàm đời cũ (nếu cần)
     implementation("androidx.appcompat:appcompat:1.6.1")
 }
