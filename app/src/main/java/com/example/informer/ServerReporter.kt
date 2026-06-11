@@ -21,11 +21,7 @@ object ServerReporter {
         timestamp: Long? = null
     ): Boolean {
         // Hỗ trợ Direct Boot bằng cách sử dụng Device Protected Storage nếu cần
-        val safeContext = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N && !context.isDeviceProtectedStorage) {
-            context.createDeviceProtectedStorageContext()
-        } else {
-            context
-        }
+        val safeContext = context.deviceProtectedContext()
         val sharedPref = safeContext.getSharedPreferences("AppConfig", Context.MODE_PRIVATE)
         val myPhone = sharedPref.getString("my_phone", "") ?: ""
         val token = sharedPref.getString("token", "") ?: ""

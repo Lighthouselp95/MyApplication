@@ -3,8 +3,6 @@ package com.example.informer
 import android.Manifest
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import android.content.ClipboardManager
-import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -19,19 +17,31 @@ import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.work.Constraints
@@ -41,8 +51,17 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+private val StarMaskTransformation = VisualTransformation { text ->
+    TransformedText(
+        AnnotatedString("*".repeat(text.text.length)),
+        OffsetMapping.Identity
+    )
+}
 
 class MainActivity : ComponentActivity() {
 
@@ -77,8 +96,16 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         val logEvents = MutableStateFlow<List<String>>(emptyList())
+        private val logLock = Any()
         fun addLog(message: String) {
-            logEvents.value = logEvents.value + message
+            val now = Date()
+            val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(now)
+            val entry = "[$time] $message"
+            synchronized(logLock) {
+                val next = logEvents.value + entry
+                logEvents.value = next
+            }
+            AppContextHolder.context?.let { AppLogStore.append(it, now.time, entry) }
         }
 
         fun formatVietnamesePhoneNumber(rawNumber: String?): String {
@@ -140,16 +167,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun getSafeSharedPreferences(): android.content.SharedPreferences {
-        val safeContext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            createDeviceProtectedStorageContext()
-        } else {
-            this
-        }
-        return safeContext.getSharedPreferences("AppConfig", Context.MODE_PRIVATE)
+        return deviceProtectedContext().getSharedPreferences("AppConfig", Context.MODE_PRIVATE)
     }
 
     override fun onResume() {
         super.onResume()
+        Log.d("MAIN_ACTIVITY", "onResume()")
         val sharedPref = getSafeSharedPreferences()
         if (uiPhoneNumber.value.isEmpty()) {
             val number = getDevicePhoneNumber()
@@ -158,77 +181,20 @@ class MainActivity : ComponentActivity() {
                 sharedPref.edit().putString("my_phone", number).apply()
             }
         }
-
-        // Ping server để tạo user nếu chưa có (khi app resume)
-        pingServerForUserRegistration(sharedPref)
-    }
-
-    private fun pingServerForUserRegistration(sharedPref: android.content.SharedPreferences) {
-        val phone = sharedPref.getString("my_phone", "") ?: ""
-        val token = sharedPref.getString("token", "") ?: ""
-
-        if (phone.isEmpty() || token.isEmpty()) {
-            Log.d("PING", "⏭️ Chưa có phone/token, bỏ qua ping")
-            return
-        }
-
-        addLog("🔍 Đang kiểm tra trạng thái máy chủ...")
-        kotlin.concurrent.thread {
-            try {
-                // Sử dụng applicationContext nhưng ServerReporter sẽ tự xử lý safeContext
-                val ok = ServerReporter.sendEventSync(
-                    context = applicationContext,
-                    type = "PING",
-                    incomingNumber = "SYSTEM",
-                    content = "App resume - kiểm tra/tạo tài khoản"
-                )
-                if (ok) {
-                    Log.d("PING", "✅ Ping server thành công - user đã sẵn sàng")
-                    addLog("✅ Kiểm tra máy chủ OK")
-                } else {
-                    Log.w("PING", "⚠️ Ping server thất bại")
-                    addLog("⚠️ Kiểm tra máy chủ thất bại")
-                }
-            } catch (e: Exception) {
-                Log.e("PING", "❌ ${e.message}")
-                addLog("❌ Lỗi ping: ${e.message}")
-            }
-        }
-    }
-
-    // 🔥 THUẬT TOÁN ĐẶT LỊCH CHẠY NGẦM WORKMANAGER 15 PHÚT/LẦN
-    private fun setupPeriodicSync() {
-        Log.d("PING", "setupPeriodicSync()")
-        // Ràng buộc phần cứng: Thiết bị bắt buộc phải kết nối Internet mới kích hoạt
-        val syncConstraints = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
-            .build()
-
-        // Tạo yêu cầu tác vụ lặp định kỳ 15 phút một lần theo tiêu chuẩn Android đời cao
-        val periodicSyncRequest = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES)
-            .setConstraints(syncConstraints)
-            .addTag("INFORMER_SYNC_WORK")
-            .build()
-
-        // Đẩy tác vụ vào quản lý lõi của Hệ điều hành Android (Cập nhật lịch nếu đã đăng ký)
-        WorkManager.getInstance(applicationContext).enqueueUniquePeriodicWork(
-            "InformerHardwareSyncTask",
-            ExistingPeriodicWorkPolicy.UPDATE,
-            periodicSyncRequest
-        )
-        addLog("🚀 Đã lập lịch đồng bộ ngầm chu kỳ 15 phút bằng WorkManager.")
-        Log.d("PING", "Đã enqueueUniquePeriodicWork InformerHardwareSyncTask")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Log.d("MAIN_ACTIVITY", "onCreate(savedInstanceState=${savedInstanceState != null})")
+        AppContextHolder.init(this)
 
         // Di chuyển và sử dụng Safe Context (Device Protected Storage)
         val safeContext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            val dpContext = createDeviceProtectedStorageContext()
+            val dpContext = deviceProtectedContext()
             dpContext.moveSharedPreferencesFrom(this, "AppConfig")
             dpContext.moveSharedPreferencesFrom(this, "SmsDedupe")
             dpContext.moveSharedPreferencesFrom(this, "CallDedupe")
+            dpContext.moveSharedPreferencesFrom(this, "AppInternalStateV4")
             dpContext
         } else {
             this
@@ -236,19 +202,28 @@ class MainActivity : ComponentActivity() {
 
         val sharedPref = getSafeSharedPreferences()
         uiPhoneNumber.value = sharedPref.getString("my_phone", "") ?: ""
+        AppLogStore.pruneExpired(this)
+        logEvents.value = AppLogStore.load(this)
 
-        // CHỖ SỬA 1: Bốc token đã lưu ra trước để nạp thẳng giá trị ban đầu ổn định cho Compose
+        // Nạp mật khẩu đã lưu để xác định trạng thái cấu hình ban đầu
         val savedToken = sharedPref.getString("token", "") ?: ""
 
-        triggerAutoInit(sharedPref)
+        AppLifecycleManager.restoreIfActivated(this, "onCreate")
 
         setContent {
             val events by logEvents.collectAsState()
             val phoneNumber by uiPhoneNumber.collectAsState()
 
-            // CHỖ SỬA 2: Đưa savedToken trực tiếp vào làm trạng thái mặc định (Default state)
-            // Tránh việc chuỗi trống "" ghi đè nhầm hoặc làm lệch token hiển thị của bạn
             var token by remember { mutableStateOf(savedToken) }
+            var tokenInput by remember { mutableStateOf("") }
+            var editingToken by remember { mutableStateOf(savedToken.isEmpty()) }
+            var tokenVisible by rememberSaveable { mutableStateOf(false) }
+            val serviceSnapshot by produceState(initialValue = ServiceWatchdog.snapshot(this@MainActivity)) {
+                while (true) {
+                    value = ServiceWatchdog.snapshot(this@MainActivity)
+                    delay(1000)
+                }
+            }
 
             LaunchedEffect(phoneNumber) {
                 if (phoneNumber.isEmpty()) {
@@ -264,189 +239,384 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp)
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = MaterialTheme.colorScheme.background
             ) {
-                Text(
-                    text = "Informing SMS/CALL App",
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(bottom = 16.dp)
-                )
-
-                Text(
-                    text = "Số điện thoại thiết bị (Tự động nhận diện):",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Box(
+                Column(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFFECEFF1), RoundedCornerShape(4.dp))
-                        .border(1.dp, Color(0xFFCFD8DC), RoundedCornerShape(4.dp))
-                        .padding(horizontal = 12.dp, vertical = 12.dp)
+                        .fillMaxSize()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text(
-                        text = if (phoneNumber.isEmpty()) "🔄 Đang tự động quét phần cứng SIM..." else phoneNumber,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = if (phoneNumber.isEmpty()) Color(0xFFE67E22) else Color.Black
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Text(
-                    text = "Mã Token định danh bảo mật:",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-
-                if (token.isEmpty()) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(
-                            text = "Chưa có mã Token nào được tạo",
-                            fontSize = 15.sp,
-                            color = Color.Gray,
-                            modifier = Modifier.weight(1f)
+                            text = "Informing SMS/CALL App",
+                            fontSize = 24.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
                         )
-
-                        Button(
-                            onClick = {
-                                val currentPhone = uiPhoneNumber.value.trim()
-                                if (currentPhone.isEmpty()) {
-                                    val forceCheckNumber = getDevicePhoneNumber()
-                                    if (forceCheckNumber.isNotEmpty()) {
-                                        uiPhoneNumber.value = forceCheckNumber
-                                        sharedPref.edit().putString("my_phone", forceCheckNumber).apply()
-                                    } else {
-                                        Toast.makeText(this@MainActivity, "Hệ thống chưa quét xong SIM, vui lòng đợi vài giây!", Toast.LENGTH_LONG).show()
-                                        return@Button
-                                    }
-                                }
-
-                                val generatedToken = UUID.randomUUID().toString().takeLast(8).uppercase()
-                                token = generatedToken
-
-                                sharedPref.edit().apply {
-                                    putString("my_phone", uiPhoneNumber.value.trim())
-                                    putString("token", generatedToken)
-                                    commit() // Dùng commit để đảm bảo dữ liệu ghi xuống đĩa ngay lập tức trước khi gửi
-                                }
-
-                                Log.d("INIT", "Đã kích hoạt: phone=${uiPhoneNumber.value.trim()} token=$generatedToken")
-
-                                ServerReporter.sendEvent(
-                                    context = safeContext, // Dùng safeContext để ServerReporter đọc đúng chỗ
-                                    type = "INIT",
-                                    incomingNumber = "HỆ THỐNG",
-                                    content = "Tài khoản được khởi tạo tự động từ phần cứng máy."
-                                )
-
-                                // 🔥 Kích hoạt WorkManager chạy ngầm tuần hoàn chuẩn hóa Google thay cho Service cũ
-                                setupPeriodicSync()
-                                startMonitoringService()
-
-                                Toast.makeText(this@MainActivity, "Đã kích hoạt thiết bị thành công!", Toast.LENGTH_SHORT).show()
-                            }
-                        ) {
-                            Text("Kích hoạt App")
-                        }
-                    }
-                } else {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .background(Color(0xFFF5F5F5), RoundedCornerShape(4.dp))
-                                .border(1.dp, Color(0xFFE0E0E0), RoundedCornerShape(4.dp))
-                                .padding(horizontal = 12.dp, vertical = 10.dp)
-                        ) {
-                            Text(
-                                text = token,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace,
-                                color = Color.Black
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.width(8.dp))
-
-                        Button(
-                            onClick = {
-                                ServerReporter.sendEvent(
-                                    context = this@MainActivity,
-                                    type = "RESET",
-                                    incomingNumber = "HỆ THỐNG",
-                                    content = "Hủy liên kết thiết bị."
-                                )
-                                token = ""
-                                sharedPref.edit().putString("token", "").apply()
-
-                                // 🔥 Hủy toàn bộ chu kỳ đồng bộ chạy ngầm khi người dùng bấm Hủy mã
-                                WorkManager.getInstance(applicationContext).cancelAllWorkByTag("INFORMER_SYNC_WORK")
-                                stopService(Intent(this@MainActivity, BackgroundMonitoringService::class.java))
-                                addLog("🛑 Đã dừng toàn bộ chu kỳ chạy ngầm.")
-                                Toast.makeText(this@MainActivity, "Đã hủy liên kết!", Toast.LENGTH_SHORT).show()
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE74C3C))
-                        ) {
-                            Text("Hủy mã")
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(20.dp))
-
-                if (token.isNotEmpty()) {
-                    Button(
-                        onClick = {
-                            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            val clip = ClipData.newPlainText("Token", token)
-                            clipboard.setPrimaryClip(clip)
-                            Toast.makeText(this@MainActivity, "Đã sao chép Token!", Toast.LENGTH_SHORT).show()
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Copy Token sang Web")
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-                HorizontalDivider(thickness = 1.dp)
-                Spacer(modifier = Modifier.height(12.dp))
-
-                Text(
-                    text = "Nhật ký đẩy dữ liệu ngầm:",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(bottom = 6.dp)
-                )
-
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    items(events) { eventText ->
                         Text(
-                            text = eventText,
+                            text = "Theo dõi SMS, cuộc gọi và đồng bộ nền",
                             fontSize = 13.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(18.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = when {
+                                !serviceSnapshot.activated -> Color(0xFFF3F4F6)
+                                serviceSnapshot.alive -> Color(0xFFEAF7EE)
+                                else -> Color(0xFFFFF3E8)
+                            }
+                        ),
+                        border = BorderStroke(
+                            1.dp,
+                            when {
+                                !serviceSnapshot.activated -> Color(0xFFD1D5DB)
+                                serviceSnapshot.alive -> Color(0xFF86EFAC)
+                                else -> Color(0xFFF5C28B)
+                            }
+                        )
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Trạng thái service",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    text = when {
+                                        !serviceSnapshot.activated -> "CHƯA KÍCH HOẠT"
+                                        serviceSnapshot.alive -> "ĐANG CHẠY"
+                                        else -> "ĐÃ CHẾT"
+                                    },
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = when {
+                                        !serviceSnapshot.activated -> androidx.compose.ui.graphics.Color(0xFF455A64)
+                                        serviceSnapshot.alive -> androidx.compose.ui.graphics.Color(0xFF1B5E20)
+                                        else -> androidx.compose.ui.graphics.Color(0xFFC62828)
+                                    }
+                                )
+                            }
+
+                            Text(
+                                text = when {
+                                    !serviceSnapshot.activated -> "Chưa có token hoặc số điện thoại nên watchdog chưa chạy."
+                                    serviceSnapshot.lastSeenAt <= 0L -> "Chưa có heartbeat từ service."
+                                    serviceSnapshot.alive -> "Heartbeat gần nhất: ${ServiceWatchdog.humanReadableAge(this@MainActivity)}."
+                                    else -> "Heartbeat gần nhất: ${ServiceWatchdog.humanReadableAge(this@MainActivity)}. Service đang bị xem là stale."
+                                },
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(18.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFF7F9FC)),
+                        border = BorderStroke(1.dp, Color(0xFFE2E8F0))
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text(
+                                text = "Thiết bị",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = if (phoneNumber.isEmpty()) "🔄 Đang tự động quét phần cứng SIM..." else phoneNumber,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = if (phoneNumber.isEmpty()) Color(0xFFE67E22) else Color.Black
+                            )
+                        }
+                    }
+
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(18.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFF7F9FC)),
+                        border = BorderStroke(1.dp, Color(0xFFE2E8F0))
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Mã bảo mật",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+
+                            if (editingToken) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = if (token.isEmpty()) "Mã" else "Mã mới",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+
+                                    Box(
+                                        modifier = Modifier.weight(1f),
+                                        contentAlignment = Alignment.CenterEnd
+                                    ) {
+                                        OutlinedTextField(
+                                            value = tokenInput,
+                                            onValueChange = { tokenInput = it },
+                                            singleLine = true,
+                                            shape = RoundedCornerShape(10.dp),
+                                            visualTransformation = if (tokenVisible) VisualTransformation.None else StarMaskTransformation,
+                                            trailingIcon = {
+                                                IconButton(
+                                                    onClick = { tokenVisible = !tokenVisible },
+                                                    modifier = Modifier.size(30.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = if (tokenVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                                        contentDescription = if (tokenVisible) "Ẩn mật khẩu" else "Hiện mật khẩu"
+                                                    )
+                                                }
+                                            },
+                                            placeholder = { Text("Nhập", fontSize = 12.sp) },
+                                            textStyle = LocalTextStyle.current.copy(fontSize = 14.sp),
+                                            modifier = Modifier
+                                                .widthIn(max = 220.dp)
+                                                .height(48.dp),
+                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
+                                        )
+                                    }
+                                }
+                            } else {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = if (token.isNotEmpty()) "*".repeat(minOf(token.length, 8)) else "********",
+                                        fontSize = 16.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = Color.Black,
+                                        modifier = Modifier.weight(1f)
+                                    )
+
+                                    ElevatedButton(
+                                        onClick = {
+                                            editingToken = true
+                                            tokenInput = ""
+                                            tokenVisible = false
+                                        },
+                                        modifier = Modifier.height(32.dp),
+                                        elevation = ButtonDefaults.elevatedButtonElevation(defaultElevation = 3.dp, pressedElevation = 1.dp)
+                                    ) {
+                                        Text("Đổi", fontSize = 12.sp)
+                                    }
+                                }
+                            }
+
+                            if (editingToken) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    ElevatedButton(
+                                        onClick = {
+                                            val enteredToken = tokenInput.trim()
+                                            if (enteredToken.isEmpty()) {
+                                                Toast.makeText(this@MainActivity, "Vui lòng nhập mật khẩu trước khi kích hoạt!", Toast.LENGTH_SHORT).show()
+                                                return@ElevatedButton
+                                            }
+
+                                            val currentPhone = uiPhoneNumber.value.trim()
+                                            if (currentPhone.isEmpty()) {
+                                                val forceCheckNumber = getDevicePhoneNumber()
+                                                if (forceCheckNumber.isNotEmpty()) {
+                                                    uiPhoneNumber.value = forceCheckNumber
+                                                    sharedPref.edit().putString("my_phone", forceCheckNumber).apply()
+                                                } else {
+                                                    Toast.makeText(this@MainActivity, "Hệ thống chưa quét xong SIM, vui lòng đợi vài giây!", Toast.LENGTH_LONG).show()
+                                                    return@ElevatedButton
+                                                }
+                                            }
+
+                                            token = enteredToken
+                                            sharedPref.edit().apply {
+                                                putString("my_phone", uiPhoneNumber.value.trim())
+                                                putString("token", enteredToken)
+                                                commit()
+                                            }
+
+                                            tokenInput = ""
+                                            tokenVisible = false
+                                            editingToken = false
+
+                                            Log.d("INIT", "Đã kích hoạt: phone=${uiPhoneNumber.value.trim()} secretSet=true")
+
+                                            ServerReporter.sendEvent(
+                                                context = safeContext,
+                                                type = "INIT",
+                                                incomingNumber = "HỆ_THỐNG",
+                                                content = "Tài khoản được khởi tạo tự động từ phần cứng máy."
+                                            )
+
+                                            AppLifecycleManager.ensureBackgroundRunning(this@MainActivity, "activate")
+
+                                            Toast.makeText(this@MainActivity, "Đã kích hoạt thiết bị thành công!", Toast.LENGTH_SHORT).show()
+                                        },
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(34.dp),
+                                        elevation = ButtonDefaults.elevatedButtonElevation(defaultElevation = 3.dp, pressedElevation = 1.dp)
+                                    ) {
+                                        Text(
+                                            if (token.isEmpty()) "Kích hoạt" else "Lưu",
+                                            fontSize = 12.sp
+                                        )
+                                    }
+
+                                    FilledTonalButton(
+                                        onClick = {
+                                            tokenInput = ""
+                                            tokenVisible = false
+                                            editingToken = token.isEmpty()
+                                        },
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(34.dp)
+                                    ) {
+                                        Text("Hủy", fontSize = 12.sp)
+                                    }
+                                }
+
+                                FilledTonalButton(
+                                    onClick = {
+                                        ServerReporter.sendEvent(
+                                            context = this@MainActivity,
+                                            type = "RESET",
+                                            incomingNumber = "HỆ_THỐNG",
+                                            content = "Hủy liên kết thiết bị."
+                                        )
+                                        token = ""
+                                        sharedPref.edit().putString("token", "").apply()
+                                        tokenInput = ""
+                                        tokenVisible = false
+                                        editingToken = true
+
+                                        WorkManager.getInstance(applicationContext).cancelAllWorkByTag("INFORMER_SYNC_WORK")
+                                        ServiceWatchdog.cancel(applicationContext, "manual-reset")
+                                        stopService(Intent(this@MainActivity, BackgroundMonitoringService::class.java))
+                                        addLog("🛑 Đã dừng toàn bộ chu kỳ chạy ngầm.")
+                                        Toast.makeText(this@MainActivity, "Đã hủy liên kết!", Toast.LENGTH_SHORT).show()
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(34.dp),
+                                    colors = ButtonDefaults.filledTonalButtonColors(
+                                        containerColor = Color(0xFFFFF1F1),
+                                        contentColor = Color(0xFFE74C3C)
+                                    )
+                                ) {
+                                    Text("Hủy mã", fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        shape = RoundedCornerShape(18.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color.White),
+                        border = BorderStroke(1.dp, Color(0xFFE5E7EB))
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Nhật ký đẩy dữ liệu ngầm",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                TextButton(
+                                    onClick = {
+                                        AppLogStore.clear(this@MainActivity)
+                                        logEvents.value = emptyList()
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(28.dp)
+                                ) {
+                                    Text("clear", fontSize = 12.sp)
+                                }
+                            }
+
+                            LazyColumn(
+                                modifier = Modifier.fillMaxSize(),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                items(events.reversed()) { eventText ->
+                                    val isWakeLog = eventText.contains("👀") || eventText.contains("🚀") || 
+                                                  eventText.contains("🫀") || eventText.contains("✅")
+                                    
+                                    val bgColor = if (isWakeLog) androidx.compose.ui.graphics.Color(0xFFE3F2FD) else androidx.compose.ui.graphics.Color.Transparent
+                                    val textColor = if (isWakeLog) androidx.compose.ui.graphics.Color(0xFF1976D2) else MaterialTheme.colorScheme.onSurfaceVariant
+                                    val fontWeight = if (isWakeLog) androidx.compose.ui.text.font.FontWeight.Medium else androidx.compose.ui.text.font.FontWeight.Normal
+
+                                    Surface(
+                                        color = bgColor,
+                                        shape = RoundedCornerShape(4.dp),
+                                        modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)
+                                    ) {
+                                        Text(
+                                            text = eventText,
+                                            fontSize = 12.sp,
+                                            fontWeight = fontWeight,
+                                            color = textColor,
+                                            softWrap = true,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp).fillMaxWidth()
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -456,50 +626,14 @@ class MainActivity : ComponentActivity() {
         checkAndRequestBatteryOptimization()
     }
 
-    private fun triggerAutoInit(sharedPref: android.content.SharedPreferences) {
-        val savedPhone = sharedPref.getString("my_phone", "") ?: ""
-        val savedToken = sharedPref.getString("token", "") ?: ""
-        Log.d("PING", "triggerAutoInit() savedPhoneSet=${savedPhone.isNotEmpty()} savedTokenSet=${savedToken.isNotEmpty()}")
-
-        if (savedPhone.isNotEmpty() && savedToken.isNotEmpty()) {
-            addLog("✅ Đã nhận diện cấu hình: $savedPhone")
-            // Chỉ gửi INIT 1 lần mỗi khi bật App, không gửi lại khi xoay màn hình hoặc resume
-            val lastInitTime = sharedPref.getLong("last_init_time", 0)
-            val currentTime = System.currentTimeMillis()
-            
-            if (currentTime - lastInitTime > 600000) { // 10 phút mới cho gửi INIT lại
-                addLog("🔄 Hệ thống đang kích hoạt đồng bộ...")
-                ServerReporter.sendEvent(
-                    context = this.applicationContext,
-                    type = "INIT",
-                    incomingNumber = "HỆ THỐNG",
-                    content = "Thiết bị kết nối lại."
-                )
-                sharedPref.edit().putLong("last_init_time", currentTime).apply()
-                Log.d("PING", "Đã gửi INIT reconnect")
-            }
-
-            setupPeriodicSync()
-            startMonitoringService()
-        }
-    }
-
-    private fun startMonitoringService() {
-        val serviceIntent = Intent(this, BackgroundMonitoringService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Log.d("SERVICE", "MainActivity.startMonitoringService() -> startForegroundService")
-            startForegroundService(serviceIntent)
-        } else {
-            Log.d("SERVICE", "MainActivity.startMonitoringService() -> startService")
-            startService(serviceIntent)
-        }
-    }
-
     private fun checkAndRequestPermissions() {
         val permissionsNeeded = mutableListOf<String>()
 
         if (checkSelfPermission(Manifest.permission.RECEIVE_SMS) != PackageManager.PERMISSION_GRANTED) {
             permissionsNeeded.add(Manifest.permission.RECEIVE_SMS)
+        }
+        if (checkSelfPermission(Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED) {
+            permissionsNeeded.add(Manifest.permission.READ_SMS)
         }
         if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
             permissionsNeeded.add(Manifest.permission.READ_PHONE_STATE)
@@ -534,6 +668,13 @@ class MainActivity : ComponentActivity() {
                 val sharedPref = getSafeSharedPreferences()
                 sharedPref.edit().putString("my_phone", number).apply()
                 uiPhoneNumber.value = number
+            }
+
+            val sharedPref = getSafeSharedPreferences()
+            val token = sharedPref.getString("token", "") ?: ""
+            if (token.isNotEmpty()) {
+                Log.d("MAIN_ACTIVITY", "Permissions granted, restarting monitoring service.")
+                AppLifecycleManager.restoreIfActivated(this, "permissions")
             }
         }
     }
