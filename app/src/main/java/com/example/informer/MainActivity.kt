@@ -209,6 +209,16 @@ class MainActivity : ComponentActivity() {
         val savedToken = sharedPref.getString("token", "") ?: ""
 
         AppLifecycleManager.restoreIfActivated(this, "onCreate")
+        
+        // Ping silently
+        ServerReporter.sendEvent(
+            context = this,
+            type = "HEARTBEAT_SILENT",
+            incomingNumber = "SYSTEM",
+            content = "App Started",
+            timestamp = null,
+            silent = true
+        )
 
         setContent {
             val events by logEvents.collectAsState()

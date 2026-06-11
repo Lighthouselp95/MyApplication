@@ -8,6 +8,9 @@ import androidx.core.content.ContextCompat
 object SmsInboxSync {
     private const val TAG = "SMS_INBOX_SYNC"
 
+    // watchdog in minutes
+    private const val WATCHDOG_INTERVAL_MINUTES = 15
+
     fun pollMissingSms(context: Context, source: String): Int {
         val safeContext = context.deviceProtectedContext()
         HistoryScanBaseline.ensureSmsBaseline(safeContext)

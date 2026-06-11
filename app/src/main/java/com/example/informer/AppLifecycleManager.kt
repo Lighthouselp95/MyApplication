@@ -50,27 +50,21 @@ object AppLifecycleManager {
 
         val cleanSource = source.substringAfterLast(".")
         val wakeMsg = when {
-            source.contains("watchdog", ignoreCase = true) -> "👀 [Watchdog] Phát hiện service gián đoạn, đã hồi sinh hệ thống."
-            source.contains("boot", ignoreCase = true) -> "🚀 [Hệ thống] Tự động khởi chạy sau khi khởi động máy."
-            source.contains("worker", ignoreCase = true) -> "🫀 [Maintenance] Worker đã kiểm tra và đảm bảo nền hoạt động."
-            source.contains("activate", ignoreCase = true) -> "✅ [Kích hoạt] Người dùng đã bật hệ thống."
-            else -> "🧩 [$cleanSource] Khôi phục trạng thái nền."
+            source.contains("watchdog", ignoreCase = true) -> "👀 [Watchdog] Hồi sinh Service nền thành công."
+            source.contains("boot", ignoreCase = true) -> "🚀 [Hệ thống] Tự động khôi phục nền sau khi khởi động máy."
+            source.contains("worker", ignoreCase = true) -> "🫀 [Maintenance] Worker duy trì nền thành công."
+            source.contains("activate", ignoreCase = true) -> "✅ [Kích hoạt] Đã bật giám sát hệ thống."
+            else -> "🧩 [$cleanSource] Nền đã sẵn sàng hoạt động."
         }
-        MainActivity.addLog(wakeMsg)
+        // MainActivity.addLog(wakeMsg) // Gộp vào cuối để tránh log thừa
         
-        if (HistoryScanBaseline.ensureInitialized(appContext)) {
-            MainActivity.addLog("📍 Đã thiết lập mốc quét từ lúc cài đặt.")
-        }
+        HistoryScanBaseline.ensureInitialized(appContext)
         
         startMonitoringService(appContext, source)
         
-        if (schedulePeriodicSync(appContext, source)) {
-            MainActivity.addLog("🚀 Đã lập lịch đồng bộ ngầm chu kỳ 15 phút bằng WorkManager.")
-        }
+        schedulePeriodicSync(appContext, source)
         
         ServiceWatchdog.schedule(appContext, source)
-        
-        MainActivity.addLog("🧩 [$cleanSource] Nền đã sẵn sàng")
     }
 
     private fun schedulePeriodicSync(context: Context, source: String): Boolean {
@@ -82,7 +76,7 @@ object AppLifecycleManager {
             .setRequiredNetworkType(NetworkType.CONNECTED)
             .build()
 
-        val request = PeriodicWorkRequestBuilder<SyncWorker>(20, TimeUnit.MINUTES)
+        val request = PeriodicWorkRequestBuilder<SyncWorker>(25, TimeUnit.MINUTES)
             .setConstraints(constraints)
             .addTag("INFORMER_SYNC_WORK")
             .build()

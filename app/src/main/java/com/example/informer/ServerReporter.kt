@@ -18,7 +18,8 @@ object ServerReporter {
         type: String,
         incomingNumber: String,
         content: String,
-        timestamp: Long? = null
+        timestamp: Long? = null,
+        silent: Boolean = false
     ): Boolean {
         // Hỗ trợ Direct Boot bằng cách sử dụng Device Protected Storage nếu cần
         val safeContext = context.deviceProtectedContext()
@@ -64,7 +65,9 @@ object ServerReporter {
                 Log.d("SERVER", "Attempt ${attempt + 1}: HTTP $code")
 
                 if (code in 200..299) {
-                    MainActivity.addLog("✅ [$type] Gửi thành công")
+                    if (!silent) {
+                        MainActivity.addLog("✅ [$type] Gửi thành công")
+                    }
                     return true
                 }
 
@@ -91,11 +94,11 @@ object ServerReporter {
         incomingNumber: String,
         content: String,
         timestamp: Long? = null,
+        silent: Boolean = false,
         onComplete: (() -> Unit)? = null
     ) {
         kotlin.concurrent.thread {
-            Log.d("SERVER", "sendEvent async type=$type incomingNumber=$incomingNumber")
-            sendEventSync(context, type, incomingNumber, content, timestamp)
+            sendEventSync(context, type, incomingNumber, content, timestamp, silent)
             onComplete?.invoke()
         }
     }

@@ -8,8 +8,8 @@ import androidx.core.content.ContextCompat
 
 class ServiceWatchdogReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        Log.d("SERVICE_WATCHDOG", "SW 10 phut dang thuc day he thong...")
-        MainActivity.addLog("🚀 [Hoi sinh] Watchdog dang dung Service day...")
+        Log.d("SERVICE_WATCHDOG", "SW 15 phut dang thuc day he thong...")
+        // Log.d đã đủ, không cần addLog ở đây để tránh trùng lặp nếu có watchdog gọi khác
 
         // Duy tri vong lap
         ServiceWatchdog.schedule(context, "receiver_tick")
