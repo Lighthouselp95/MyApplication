@@ -9,10 +9,9 @@ class KeepAliveJobService : JobService() {
         val context = applicationContext
         val prefs = context.getSharedPreferences("ServiceState", 0)
         
-        // Kiểm tra AM còn sống không (heartbeat trong 30 phút gần đây)
-        // AM ping mỗi 1-5 phút (screen on) hoặc 3-5 phút (screen off), 30 phút là ngưỡng an toàn
+        // Kiểm tra AM còn sống không (heartbeat trong 10 phút gần đây)
         val lastHeartbeat = prefs.getLong("last_alarm_heartbeat", 0L)
-        val amAlive = (System.currentTimeMillis() - lastHeartbeat) < 30 * 60 * 1000L
+        val amAlive = (System.currentTimeMillis() - lastHeartbeat) < 10 * 60 * 1000L
         
         if (amAlive) {
             Log.d("KEEP_ALIVE", "⏺ AM còn sống, JobScheduler bỏ qua lượt này.")
