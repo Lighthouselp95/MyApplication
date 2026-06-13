@@ -33,7 +33,8 @@ class AlarmReceiver : BroadcastReceiver() {
 
     private fun scheduleNext(context: Context) {
         val prefs = context.getSharedPreferences("ServiceState", Context.MODE_PRIVATE)
-        val isScreenOn = prefs.getBoolean("is_screen_on", true)
+        // Mặc định false (cẩn thận) - nếu không chắc thì coi như màn hình tắt
+        val isScreenOn = prefs.getBoolean("is_screen_on", false)
         
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(context, AlarmReceiver::class.java)
