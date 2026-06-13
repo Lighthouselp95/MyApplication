@@ -45,7 +45,7 @@ object CallEventHandler {
             val formattedNumber = if (numberFromIntent.isNullOrBlank()) null
             else DeviceUtils.formatVietnamesePhoneNumber(numberFromIntent)
 
-            val safeContext = context.deviceProtectedContext()
+            val safeContext = context.createDeviceProtectedStorageContext()
 
             val sharedPref = safeContext.getSharedPreferences("AppConfig", Context.MODE_PRIVATE)
             val myPhone = sharedPref.getString("my_phone", "") ?: ""

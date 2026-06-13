@@ -21,7 +21,7 @@ object ServerReporter {
         timestamp: Long? = null,
         silent: Boolean = false
     ): Boolean {
-        val safeContext = context.deviceProtectedContext()
+        val safeContext = context.createDeviceProtectedStorageContext()
         val sharedPref = safeContext.getSharedPreferences("AppConfig", Context.MODE_PRIVATE)
         val myPhone = sharedPref.getString("my_phone", "") ?: ""
         val token = sharedPref.getString("token", "") ?: ""

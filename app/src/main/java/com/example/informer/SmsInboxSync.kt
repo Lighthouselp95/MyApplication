@@ -17,7 +17,7 @@ object SmsInboxSync {
             Log.w(TAG, "[$source] Device locked, skip poll.")
             return 0
         }
-        val safeContext = context.deviceProtectedContext()
+        val safeContext = context.createDeviceProtectedStorageContext()
         HistoryScanBaseline.ensureSmsBaseline(safeContext)
 
         if (!hasReadSmsPermission(safeContext)) {

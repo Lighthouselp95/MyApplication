@@ -15,7 +15,7 @@ object HistoryScanBaseline {
     private const val TAG = "SCAN_BASELINE"
 
     fun ensureInitialized(context: Context): Boolean {
-        val safeContext = context.deviceProtectedContext()
+        val safeContext = context.createDeviceProtectedStorageContext()
         val smsReady = ensureSmsBaseline(safeContext)
         val callReady = ensureCallBaseline(safeContext)
         return smsReady || callReady

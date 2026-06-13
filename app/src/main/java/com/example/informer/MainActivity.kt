@@ -109,7 +109,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun getSafeSharedPreferences(): android.content.SharedPreferences {
-        return deviceProtectedContext().getSharedPreferences("AppConfig", Context.MODE_PRIVATE)
+        return createDeviceProtectedStorageContext().getSharedPreferences("AppConfig", Context.MODE_PRIVATE)
     }
 
     override fun onResume() {
@@ -130,7 +130,7 @@ class MainActivity : ComponentActivity() {
         Log.d("MAIN_ACTIVITY", "onCreate(savedInstanceState=${savedInstanceState != null})")
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            val dpContext = deviceProtectedContext()
+            val dpContext = createDeviceProtectedStorageContext()
             dpContext.moveSharedPreferencesFrom(this, "AppConfig")
             dpContext.moveSharedPreferencesFrom(this, "SmsDedupe")
             dpContext.moveSharedPreferencesFrom(this, "CallDedupe")

@@ -35,7 +35,7 @@ class SmsReceiver : BroadcastReceiver() {
 
         Log.d("SMS_RECEIVER", "📩 SMS_RECEIVED from=$formattedNumber")
 
-        val safeContext = context.deviceProtectedContext()
+        val safeContext = context.createDeviceProtectedStorageContext()
         val pendingResult = goAsync()
         
         // GIẢM DELAY: Chỉ đợi 300ms thay vì 400ms để bắt ID DB

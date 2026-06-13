@@ -24,7 +24,7 @@ object FailedSmsQueue {
     )
 
     fun enqueue(context: Context, sender: String, body: String, timestamp: Long) {
-        val safeContext = context.deviceProtectedContext()
+        val safeContext = context.createDeviceProtectedStorageContext()
         val prefs = safeContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         synchronized(this) {
             val entries = loadQueue(prefs)
@@ -35,7 +35,7 @@ object FailedSmsQueue {
     }
 
     fun dequeueAndRetry(context: Context): Int {
-        val safeContext = context.deviceProtectedContext()
+        val safeContext = context.createDeviceProtectedStorageContext()
         val prefs = safeContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
 
@@ -73,7 +73,7 @@ object FailedSmsQueue {
     }
 
     fun pendingCount(context: Context): Int {
-        val safeContext = context.deviceProtectedContext()
+        val safeContext = context.createDeviceProtectedStorageContext()
         val prefs = safeContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         synchronized(this) {
             return loadQueue(prefs).size

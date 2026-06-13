@@ -10,25 +10,57 @@ import android.util.Log
 
 class AlarmReceiver : BroadcastReceiver() {
 
+    /**
+     * Lịch leo thang delay khi màn hình tắt/thiết bị idle.
+     * Màn hình sáng: 1 phút (giữ app sống).
+     * Màn hình tắt: leo thang đến 15 phút rồi ổn định.
+     */
     private val delaySchedule = longArrayOf(
-        180_000L, 180_000L,       // 3 phút x 2
-        300_000L, 300_000L,       // 5 phút x 2
-        600_000L,                 // 10 phút x 1
-        900_000L                  // 15 phút (mốc tối đa)
+        3 * 60_000L,       // 3 phút
+        5 * 60_000L,       // 5 phút
+        10 * 60_000L,      // 10 phút
+        15 * 60_000L,      // 15 phút (mốc tối đa — lặp lại)
     )
+
+    /** Delay khi màn hình sáng (người dùng đang dùng máy) — 1 phút để app sống */
+    private val screenOnDelay = 60_000L  // 1 phút
 
     override fun onReceive(context: Context, intent: Intent) {
         Log.d("ALARM_RECEIVER", "⏰ [Nhịp Tim] Thức dậy kiểm tra hệ thống...")
         
-        // 1. Ghi heartbeat để JS/WM biết AM còn sống
+        // 1. Ghi heartbeat để WM biết AM còn sống
         val prefs = context.getSharedPreferences("ServiceState", Context.MODE_PRIVATE)
         prefs.edit().putLong("last_alarm_heartbeat", System.currentTimeMillis()).apply()
         
         // 2. Thực hiện hồi sinh / kiểm tra Service
         AppLifecycleManager.ensureBackgroundRunning(context, "ALARM_TICK")
+
+        // 3. Gửi ping silent lên server (thay vì đợi WorkManager)
+        sendSilentPing(context)
         
-        // 3. Lên lịch báo thức kế tiếp
+        // 4. Lên lịch báo thức kế tiếp
         scheduleNext(context)
+    }
+
+    /**
+     * Gửi heartbeat silent (im lặng) lên server qua AM,
+     * không cần phụ thuộc WorkManager.
+     */
+    private fun sendSilentPing(context: Context) {
+        kotlin.concurrent.thread {
+            try {
+                val ok = ServerReporter.sendEventSync(
+                    context = context.applicationContext,
+                    type = "HEARTBEAT",
+                    incomingNumber = "HE_THONG",
+                    content = "AM heartbeat — he thong on dinh.",
+                    silent = true
+                )
+                Log.d("ALARM_RECEIVER", "📡 Ping server: ${if (ok) "OK" else "FAIL"}")
+            } catch (e: Exception) {
+                Log.e("ALARM_RECEIVER", "❌ Lỗi ping server: ${e.message}")
+            }
+        }
     }
 
     private fun scheduleNext(context: Context) {
@@ -49,9 +81,9 @@ class AlarmReceiver : BroadcastReceiver() {
         val nextDelay: Long
         if (isScreenOn && !isDeviceIdle) {
             // Màn hình sáng + thiết bị không idle → người dùng đang dùng thật
-            nextDelay = 60_000L
+            nextDelay = screenOnDelay
             prefs.edit().putInt("backoff_level", 0).apply()
-            Log.d("ALARM_RECEIVER", "📱 Người dùng đang dùng máy. Ping dồn dập 1 phút tiếp theo.")
+            Log.d("ALARM_RECEIVER", "📱 Người dùng đang dùng máy. Ping ${screenOnDelay / 60_000} phút tiếp theo.")
         } else {
             // Màn hình tắt hoặc thiết bị idle → leo thang
             var level = prefs.getInt("backoff_level", 0)

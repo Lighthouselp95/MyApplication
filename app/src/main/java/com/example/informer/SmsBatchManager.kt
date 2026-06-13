@@ -13,7 +13,7 @@ object SmsBatchManager {
     private val handler = Handler(Looper.getMainLooper())
 
     fun enqueue(context: Context, sender: String, body: String, timestamp: Long) {
-        val safeContext = context.deviceProtectedContext()
+        val safeContext = context.createDeviceProtectedStorageContext()
         synchronized(messageList) {
             messageList.add(SmsReceiver.SmsData(sender, body, timestamp))
             pendingTask?.let { handler.removeCallbacks(it) }

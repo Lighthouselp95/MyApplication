@@ -14,7 +14,7 @@ object CallLogSync {
             Log.w(TAG, "[$source] Device locked, skip poll.")
             return 0
         }
-        val safeContext = context.deviceProtectedContext()
+        val safeContext = context.createDeviceProtectedStorageContext()
         HistoryScanBaseline.ensureCallBaseline(safeContext)
 
         if (!hasReadCallLogPermission(safeContext)) {
