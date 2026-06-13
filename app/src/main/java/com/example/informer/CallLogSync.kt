@@ -9,6 +9,11 @@ object CallLogSync {
     private const val TAG = "CALL_LOG_SYNC"
 
     fun pollMissingCalls(context: Context, source: String): Int {
+        val userManager = context.getSystemService(android.os.UserManager::class.java)
+        if (userManager?.isUserUnlocked != true) {
+            Log.w(TAG, "[$source] Device locked, skip poll.")
+            return 0
+        }
         val safeContext = context.deviceProtectedContext()
         HistoryScanBaseline.ensureCallBaseline(safeContext)
 

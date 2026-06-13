@@ -42,10 +42,12 @@
             android:foregroundServiceType="specialUse"
             android:stopWithTask="false"
             android:directBootAware="true">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="monitorSmsAndCalls" />
         </service>
+
+        <service
+            android:name=".KeepAliveJobService"
+            android:permission="android.permission.BIND_JOB_SERVICE"
+            android:exported="true" />
 
         <receiver
             android:name=".BootReceiver"
@@ -57,6 +59,11 @@
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.USER_UNLOCKED" />
+                <action android:name="android.intent.action.BATTERY_LOW" />
+                <action android:name="android.intent.action.ACTION_POWER_CONNECTED" />
+                <action android:name="android.intent.action.ACTION_POWER_DISCONNECTED" />
+                <action android:name="android.intent.action.PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 
@@ -81,10 +88,29 @@
         </receiver>
 
         <receiver
-            android:name=".ServiceWatchdogReceiver"
+            android:name=".AlarmReceiver"
             android:enabled="true"
             android:exported="false"
             android:directBootAware="true" />
+
+        <receiver
+            android:name=".ConnectivityReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.net.conn.CONNECTIVITY_CHANGE" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".HealthCheckReceiver"
+            android:enabled="true"
+            android:exported="true"
+            tools:ignore="ExportedReceiver">
+            <intent-filter>
+                <action android:name="com.example.informer.CHECK_HEALTH" />
+            </intent-filter>
+        </receiver>
 
         <activity
             android:name=".MainActivity"

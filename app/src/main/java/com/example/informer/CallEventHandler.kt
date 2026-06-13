@@ -84,8 +84,6 @@ object CallEventHandler {
 
             kotlin.concurrent.thread {
                 try {
-                    Thread.sleep(3_000)
-
                     Log.d("CALL_HANDLER", "[$source] Dang gui call event len server number=$displayName raw=$numberFromIntent")
                     ServerReporter.sendEventSync(
                         context = context.applicationContext,
