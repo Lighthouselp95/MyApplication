@@ -73,17 +73,18 @@ object AppLifecycleManager {
                 .setRequiredNetworkType(NetworkType.CONNECTED)
                 .build()
 
-            val syncRequest = PeriodicWorkRequestBuilder<SyncWorker>(10, TimeUnit.MINUTES)
+            // 25 phút — như cũ. WM chỉ đóng vai trò watchdog dự phòng.
+            val syncRequest = PeriodicWorkRequestBuilder<SyncWorker>(25, TimeUnit.MINUTES)
                 .setConstraints(constraints)
                 .addTag("INFORMER_SYNC_WORK")
                 .build()
 
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
                 UNIQUE_SYNC_WORK,
-                ExistingPeriodicWorkPolicy.KEEP,
+                ExistingPeriodicWorkPolicy.UPDATE,
                 syncRequest
             )
-            Log.d(TAG, "[$source] WorkManager đã được schedule 10 phút/lần")
+            Log.d(TAG, "[$source] WorkManager đã được schedule 25 phút/lần")
         } catch (e: Exception) {
             Log.e(TAG, "[$source] Lỗi schedule WorkManager: ${e.message}")
         }
@@ -96,8 +97,9 @@ object AppLifecycleManager {
             val existing = scheduler.getPendingJob(JOB_SCHEDULER_ID)
             if (existing != null) return // Đã schedule rồi
 
+            // 25 phút — như WorkManager, chỉ watchdog dự phòng
             val jobInfo = JobInfo.Builder(JOB_SCHEDULER_ID, ComponentName(context, KeepAliveJobService::class.java))
-                .setPeriodic(10 * 60 * 1000L) // 10 phút
+                .setPeriodic(25 * 60 * 1000L) // 25 phút
                 .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
                 .setPersisted(true) // Giữ qua reboot
                 .setBackoffCriteria(5 * 60 * 1000L, JobInfo.BACKOFF_POLICY_LINEAR)

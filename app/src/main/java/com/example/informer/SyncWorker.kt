@@ -1,9 +1,7 @@
 package com.example.informer
 
 import android.content.Context
-import android.content.Intent
 import android.util.Log
-import androidx.core.content.ContextCompat
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import kotlinx.coroutines.Dispatchers
@@ -18,10 +16,11 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             return@withContext Result.success()
         }
 
-        // Kiểm tra AM còn sống không (heartbeat trong 10 phút gần đây)
+        // Watchdog: kiểm tra AM còn sống không (heartbeat trong 30 phút gần đây)
+        // AM đã tự ping server rồi nên WM chỉ cần đánh thức nếu AM/Service chết
         val prefs = appContext.getSharedPreferences("ServiceState", Context.MODE_PRIVATE)
         val lastHeartbeat = prefs.getLong("last_alarm_heartbeat", 0L)
-        val amAlive = (System.currentTimeMillis() - lastHeartbeat) < 10 * 60 * 1000L
+        val amAlive = (System.currentTimeMillis() - lastHeartbeat) < 30 * 60 * 1000L
         
         if (!amAlive && !isServiceRunning(appContext)) {
             Log.d("SYNC_WORKER", "🫀 [SyncWorker] AM chết & Service đã chết, gọi đánh thức!")
@@ -30,28 +29,11 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         } else if (!amAlive) {
             Log.d("SYNC_WORKER", "✅ AM chết nhưng Service vẫn sống.")
         } else {
-            Log.d("SYNC_WORKER", "⏺ AM còn sống, WorkManager bỏ qua.")
+            Log.d("SYNC_WORKER", "⏺ AM còn alive, WorkManager watchdog bỏ qua.")
         }
-
-        return@withContext try {
-            val ok = ServerReporter.sendEventSync(
-                context = appContext,
-                type = "HEARTBEAT_STRONG",
-                incomingNumber = "HE_THONG",
-                content = "Ve si manh nhat da kiem tra, service ok.",
-                silent = true
-            )
-
-            if (ok) {
-                MainActivity.addLog("🫀 [SYS] Kiểm tra Service hoàn tất (20p)")
-                Result.success()
-            } else {
-                Result.retry()
-            }
-        } catch (e: Exception) {
-            Log.e("SYNC_WORKER", "❌ Loi luong manh nhat: ${e.message}")
-            Result.retry()
-        }
+        // Ping server qua AM (không cần WM gửi riêng nữa)
+        // WM chỉ đóng vai trò watchdog đánh thức nếu AM/Service chết
+        return@withContext Result.success()
     }
 
     private fun isServiceRunning(context: Context): Boolean {

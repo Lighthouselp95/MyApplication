@@ -50,6 +50,7 @@ class BackgroundMonitoringService : Service() {
         val userManager = getSystemService(android.os.UserManager::class.java)
         if (userManager?.isUserUnlocked == true) {
             Log.d("SERVICE", "Device unlocked, starting observers.")
+
             if (hasReadSmsPermission()) {
                 registerSmsObserver()
             }
